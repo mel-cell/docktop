@@ -16,6 +16,13 @@ mod ui;
 use app::App;
 use docker::{Container, ContainerStats, ContainerInspection, DockerClient};
 
+#[derive(Debug)]
+enum Action {
+    Start(String),
+    Stop(String),
+    Restart(String),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Setup Terminal
@@ -30,6 +37,8 @@ async fn main() -> Result<()> {
     let (tx_details, mut rx_details) = mpsc::channel::<(Option<ContainerStats>, Option<ContainerInspection>)>(10);
     let (tx_logs, mut rx_logs) = mpsc::channel::<String>(100);
     let (tx_target, rx_target) = watch::channel::<Option<String>>(None);
+    let (tx_action, mut rx_action) = mpsc::channel::<Action>(10);
+    let (tx_action_result, mut rx_action_result) = mpsc::channel::<String>(10);
 
     // Docker Client (Shared)
     let docker_client = std::sync::Arc::new(DockerClient::new());
@@ -53,13 +62,12 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let mut last_fetch = std::time::Instant::now();
         loop {
-            // Check if target changed OR 2 seconds passed
             let target_changed = rx_target_details.has_changed().unwrap_or(false);
             let time_to_update = last_fetch.elapsed() >= Duration::from_secs(2);
             
             if target_changed || time_to_update {
                 if target_changed {
-                    let _ = rx_target_details.borrow_and_update(); // Mark as seen
+                    let _ = rx_target_details.borrow_and_update();
                 }
                 
                 let target_id = rx_target_details.borrow().clone();
@@ -101,15 +109,12 @@ async fn main() -> Result<()> {
                     
                     current_log_task = Some(tokio::spawn(async move {
                         if let Ok(mut stream) = client.get_logs_stream(&id).await {
-                             // Peek first 8 bytes to detect Multiplexing vs TTY
                              let mut header = [0u8; 8];
                              if stream.read_exact(&mut header).await.is_err() { return; }
                              
-                             // Docker Multiplex Header: [StreamType(1), 0, 0, 0, Size(4 bytes)]
                              let is_multiplexed = header[0] <= 2 && header[1] == 0 && header[2] == 0 && header[3] == 0;
                              
                              if is_multiplexed {
-                                 // Handle first chunk
                                  let size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
                                  if size < 10_000_000 {
                                      let mut payload = vec![0u8; size];
@@ -118,34 +123,24 @@ async fn main() -> Result<()> {
                                          for l in line.lines() { if tx.send(l.to_string()).await.is_err() { return; } }
                                      }
                                  }
-                                 
-                                 // Loop for the rest
                                  loop {
                                      if stream.read_exact(&mut header).await.is_err() { break; }
                                      let size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
-                                     if size > 10_000_000 { break; } // Sanity check
-                                     
+                                     if size > 10_000_000 { break; }
                                      let mut payload = vec![0u8; size];
                                      if stream.read_exact(&mut payload).await.is_err() { break; }
-                                     
                                      let line = String::from_utf8_lossy(&payload).to_string();
-                                     for l in line.lines() {
-                                         if tx.send(l.to_string()).await.is_err() { return; }
-                                     }
+                                     for l in line.lines() { if tx.send(l.to_string()).await.is_err() { return; } }
                                  }
                              } else {
-                                 // TTY Mode: Treat header as data
                                  let chunk = String::from_utf8_lossy(&header).to_string();
                                  if tx.send(chunk).await.is_err() { return; }
-                                 
-                                 // Read rest as raw stream
                                  let mut buffer = [0u8; 1024];
                                  loop {
                                      match stream.read(&mut buffer).await {
                                          Ok(0) => break,
                                          Ok(n) => {
                                              let s = String::from_utf8_lossy(&buffer[..n]).to_string();
-                                             // Simple split by newline to avoid huge single lines
                                              for line in s.split_inclusive('\n') {
                                                  if tx.send(line.to_string()).await.is_err() { return; }
                                              }
@@ -162,9 +157,37 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Task 4: Action Executor
+    let client_clone4 = docker_client.clone();
+    tokio::spawn(async move {
+        while let Some(action) = rx_action.recv().await {
+            let res = match action {
+                Action::Start(id) => {
+                    match client_clone4.start_container(&id).await {
+                        Ok(_) => format!("Started container {}", &id[..12]),
+                        Err(e) => format!("Failed to start: {}", e),
+                    }
+                }
+                Action::Stop(id) => {
+                    match client_clone4.stop_container(&id).await {
+                        Ok(_) => format!("Stopped container {}", &id[..12]),
+                        Err(e) => format!("Failed to stop: {}", e),
+                    }
+                }
+                Action::Restart(id) => {
+                    match client_clone4.restart_container(&id).await {
+                        Ok(_) => format!("Restarted container {}", &id[..12]),
+                        Err(e) => format!("Failed to restart: {}", e),
+                    }
+                }
+            };
+            let _ = tx_action_result.send(res).await;
+        }
+    });
+
     // App State
     let mut app = App::new();
-    let tick_rate = Duration::from_millis(100); // Faster tick for smoother UI
+    let tick_rate = Duration::from_millis(100);
     let mut last_tick = std::time::Instant::now();
 
     loop {
@@ -178,16 +201,37 @@ async fn main() -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Char('j') => {
                         app.next();
                         if let Some(c) = app.get_selected_container() {
                             let _ = tx_target.send(Some(c.id.clone()));
                         }
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::Char('k') => {
                         app.previous();
                         if let Some(c) = app.get_selected_container() {
                             let _ = tx_target.send(Some(c.id.clone()));
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        if let Some(c) = app.get_selected_container() {
+                            let id = c.id.clone();
+                            app.set_action_status("Restarting...".to_string());
+                            let _ = tx_action.send(Action::Restart(id)).await;
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(c) = app.get_selected_container() {
+                            let id = c.id.clone();
+                            app.set_action_status("Stopping...".to_string());
+                            let _ = tx_action.send(Action::Stop(id)).await;
+                        }
+                    }
+                    KeyCode::Char('u') => { // 'u' for Up/Start
+                        if let Some(c) = app.get_selected_container() {
+                            let id = c.id.clone();
+                            app.set_action_status("Starting...".to_string());
+                            let _ = tx_action.send(Action::Start(id)).await;
                         }
                     }
                     _ => {}
@@ -199,7 +243,6 @@ async fn main() -> Result<()> {
             // Update Containers
             while let Ok(containers) = rx_containers.try_recv() {
                 app.containers = containers;
-                // Initial selection logic
                 if app.containers.len() > 0 && rx_target.borrow().is_none() {
                      if let Some(c) = app.get_selected_container() {
                         let _ = tx_target.send(Some(c.id.clone()));
@@ -209,6 +252,10 @@ async fn main() -> Result<()> {
 
             // Update Details
             while let Ok((stats, inspect)) = rx_details.try_recv() {
+                // Store current as previous before updating
+                if let Some(curr) = app.current_stats.take() {
+                    app.previous_stats = Some(curr);
+                }
                 app.current_stats = stats;
                 app.current_inspection = inspect;
                 app.is_loading_details = false;
@@ -218,6 +265,13 @@ async fn main() -> Result<()> {
             while let Ok(log) = rx_logs.try_recv() {
                 app.add_log(log);
             }
+
+            // Update Action Results
+            while let Ok(msg) = rx_action_result.try_recv() {
+                app.set_action_status(msg);
+            }
+            
+            app.clear_action_status();
 
             last_tick = std::time::Instant::now();
         }

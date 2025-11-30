@@ -108,6 +108,20 @@ impl DockerClient {
         
         let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
         if parts.len() < 2 {
+            // Check if it's a 204 No Content (common for start/stop/restart)
+            if response_str.starts_with("HTTP/1.1 204") {
+                return Ok("".to_string());
+            }
+            // Check for 304 Not Modified
+            if response_str.starts_with("HTTP/1.1 304") {
+                return Ok("".to_string());
+            }
+             // Check for 200 OK
+             if response_str.starts_with("HTTP/1.1 200") {
+                 // Might be empty body?
+                 return Ok("".to_string());
+             }
+
             return Err(anyhow::anyhow!("Invalid response from Docker daemon: {}", response_str.chars().take(100).collect::<String>()));
         }
         
@@ -138,7 +152,7 @@ impl DockerClient {
     pub async fn get_logs_stream(&self, container_id: &str) -> Result<UnixStream> {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
         let request = format!(
-            "GET /containers/{}/logs?stdout=true&stderr=true&tail=50&follow=true HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", 
+            "GET /containers/{}/logs?stdout=true&stderr=true&tail=50&follow=true HTTP/1.0\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", 
             container_id
         );
         stream.write_all(request.as_bytes()).await?;
@@ -158,5 +172,23 @@ impl DockerClient {
         }
 
         Ok(stream)
+    }
+
+    pub async fn start_container(&self, container_id: &str) -> Result<()> {
+        let request = format!("POST /containers/{}/start HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", container_id);
+        self.send_request(&request).await?;
+        Ok(())
+    }
+
+    pub async fn stop_container(&self, container_id: &str) -> Result<()> {
+        let request = format!("POST /containers/{}/stop HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", container_id);
+        self.send_request(&request).await?;
+        Ok(())
+    }
+
+    pub async fn restart_container(&self, container_id: &str) -> Result<()> {
+        let request = format!("POST /containers/{}/restart HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", container_id);
+        self.send_request(&request).await?;
+        Ok(())
     }
 }
