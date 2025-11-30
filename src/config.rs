@@ -2,7 +2,6 @@ use serde::Deserialize;
 use ratatui::style::Color;
 use std::fs;
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -17,6 +16,7 @@ fn default_theme_name() -> String {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Theme {
     pub main_bg: Color,
     pub main_fg: Color,

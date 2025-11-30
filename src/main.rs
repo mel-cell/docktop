@@ -8,6 +8,13 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, watch};
 use tokio::io::AsyncReadExt;
+use bollard::Docker;
+use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
+use futures_util::stream::StreamExt;
+use http_body_util::Full;
+use http_body_util::Either;
+use bytes::Bytes;
 
 mod app;
 mod config;
@@ -22,6 +29,10 @@ enum Action {
     Start(String),
     Stop(String),
     Restart(String),
+    Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String },
+    Build { tag: String, path: std::path::PathBuf, mount: bool },
+    ComposeUp { path: std::path::PathBuf },
+    Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
 }
 
 #[tokio::main]
@@ -159,26 +170,239 @@ async fn main() -> Result<()> {
     });
 
     // Task 4: Action Executor
-    let client_clone4 = docker_client.clone();
     tokio::spawn(async move {
+        let docker = Docker::connect_with_local_defaults().unwrap();
         while let Some(action) = rx_action.recv().await {
             let res = match action {
                 Action::Start(id) => {
-                    match client_clone4.start_container(&id).await {
+                    match docker.start_container(&id, None::<StartContainerOptions>).await {
                         Ok(_) => format!("Started container {}", &id[..12]),
                         Err(e) => format!("Failed to start: {}", e),
                     }
                 }
                 Action::Stop(id) => {
-                    match client_clone4.stop_container(&id).await {
+                    match docker.stop_container(&id, None::<StopContainerOptions>).await {
                         Ok(_) => format!("Stopped container {}", &id[..12]),
                         Err(e) => format!("Failed to stop: {}", e),
                     }
                 }
                 Action::Restart(id) => {
-                    match client_clone4.restart_container(&id).await {
+                    match docker.restart_container(&id, None::<RestartContainerOptions>).await {
                         Ok(_) => format!("Restarted container {}", &id[..12]),
                         Err(e) => format!("Failed to restart: {}", e),
+                    }
+                }
+                Action::Create { image, name, ports, env, cpu, memory } => {
+                    let _ = tx_action_result.send(format!("Pulling {}...", image)).await;
+                    let mut stream = docker.create_image(
+                        Some(CreateImageOptions { from_image: Some(image.clone()), ..Default::default() }),
+                        None,
+                        None
+                    );
+                    while let Some(_) = stream.next().await {}
+
+                    let _ = tx_action_result.send(format!("Creating {}...", name)).await;
+                    
+                    let mut port_bindings = std::collections::HashMap::new();
+                    let mut exposed_ports = std::collections::HashMap::new();
+                    if !ports.is_empty() {
+                         let parts: Vec<&str> = ports.split(':').collect();
+                         if parts.len() == 2 {
+                             let container_port = format!("{}/tcp", parts[1]);
+                             exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
+                             port_bindings.insert(container_port, Some(vec![PortBinding {
+                                 host_ip: Some("0.0.0.0".to_string()),
+                                 host_port: Some(parts[0].to_string()),
+                             }]));
+                         }
+                    }
+
+                    let nano_cpus = if !cpu.is_empty() {
+                        cpu.parse::<f64>().ok().map(|v| (v * 1_000_000_000.0) as i64)
+                    } else { None };
+
+                    let memory_bytes = if !memory.is_empty() {
+                        let lower = memory.to_lowercase();
+                        if let Some(val) = lower.strip_suffix('m') {
+                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024)
+                        } else if let Some(val) = lower.strip_suffix('g') {
+                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
+                        } else if let Some(val) = lower.strip_suffix('k') {
+                            val.parse::<i64>().ok().map(|v| v * 1024)
+                        } else {
+                            lower.parse::<i64>().ok()
+                        }
+                    } else { None };
+
+                    let envs = if !env.is_empty() { Some(vec![env]) } else { None };
+                    
+                    let config = ContainerCreateBody {
+                        image: Some(image.clone()),
+                        exposed_ports: Some(exposed_ports),
+                        host_config: Some(HostConfig {
+                            port_bindings: Some(port_bindings),
+                            nano_cpus,
+                            memory: memory_bytes,
+                            ..Default::default()
+                        }),
+                        env: envs,
+                        ..Default::default()
+                    };
+
+                    let options = if !name.is_empty() {
+                        Some(CreateContainerOptions { name: Some(name.clone()), ..Default::default() })
+                    } else { None };
+
+                    match docker.create_container(options, config).await {
+                        Ok(res) => {
+                            let _ = tx_action_result.send(format!("Starting {}...", res.id)).await;
+                            match docker.start_container(&res.id, None::<StartContainerOptions>).await {
+                                Ok(_) => format!("Started new container {}", &res.id[..12]),
+                                Err(e) => format!("Failed to start: {}", e),
+                            }
+                        },
+                        Err(e) => format!("Failed to create: {}", e),
+                    }
+                }
+                Action::Build { tag, path, mount } => {
+                     let _ = tx_action_result.send(format!("Building {}...", tag)).await;
+                     
+                     let mut tar = tar::Builder::new(Vec::new());
+                     if let Err(e) = tar.append_dir_all(".", &path) {
+                         format!("Failed to pack context: {}", e)
+                     } else {
+                         let tar_content = tar.into_inner().unwrap();
+                         let build_options = BuildImageOptions {
+                             t: Some(tag.clone()),
+                             rm: true,
+                             ..Default::default()
+                         };
+                         
+                         let body = Full::new(Bytes::from(tar_content));
+                         let mut stream = docker.build_image(build_options, None, Some(Either::Left(body)));
+                         while let Some(_) = stream.next().await {}
+                         
+                         // Run
+                         let _ = tx_action_result.send(format!("Running {}...", tag)).await;
+                         let mut host_config = HostConfig::default();
+                         if mount {
+                             if let Ok(abs_path) = std::fs::canonicalize(&path) {
+                                 host_config.binds = Some(vec![format!("{}:/app", abs_path.to_string_lossy())]);
+                             }
+                         }
+
+                         let config = ContainerCreateBody {
+                             image: Some(tag.clone()),
+                             host_config: Some(host_config),
+                             ..Default::default()
+                         };
+                         
+                         match docker.create_container(None::<CreateContainerOptions>, config).await {
+                             Ok(res) => {
+                                 match docker.start_container(&res.id, None::<StartContainerOptions>).await {
+                                     Ok(_) => format!("Built and started {}", &res.id[..12]),
+                                     Err(e) => format!("Failed to start: {}", e),
+                                 }
+                             },
+                             Err(e) => format!("Failed to create: {}", e),
+                         }
+                     }
+                }
+                Action::ComposeUp { path } => {
+                    let _ = tx_action_result.send("Running docker compose up...".to_string()).await;
+                    let output = std::process::Command::new("docker")
+                        .arg("compose")
+                        .arg("up")
+                        .arg("-d")
+                        .current_dir(path)
+                        .output();
+                        
+                    match output {
+                        Ok(o) => {
+                            if o.status.success() {
+                                "Compose Up Successful".to_string()
+                            } else {
+                                format!("Compose Failed: {}", String::from_utf8_lossy(&o.stderr))
+                            }
+                        },
+                        Err(e) => format!("Failed to run compose: {}", e),
+                    }
+                }
+                Action::Replace { old_id, image, name, ports, env, cpu, memory } => {
+                     let _ = tx_action_result.send(format!("Stopping {}...", old_id)).await;
+                     let _ = docker.stop_container(&old_id, None::<StopContainerOptions>).await;
+                     let _ = tx_action_result.send(format!("Removing {}...", old_id)).await;
+                     let _ = docker.remove_container(&old_id, None::<RemoveContainerOptions>).await;
+                     
+                    let _ = tx_action_result.send(format!("Pulling {}...", image)).await;
+                    let mut stream = docker.create_image(
+                        Some(CreateImageOptions { from_image: Some(image.clone()), ..Default::default() }),
+                        None,
+                        None
+                    );
+                    while let Some(_) = stream.next().await {}
+
+                    let _ = tx_action_result.send(format!("Creating {}...", name)).await;
+                    
+                    let mut port_bindings = std::collections::HashMap::new();
+                    let mut exposed_ports = std::collections::HashMap::new();
+                    if !ports.is_empty() {
+                         let parts: Vec<&str> = ports.split(':').collect();
+                         if parts.len() == 2 {
+                             let container_port = format!("{}/tcp", parts[1]);
+                             exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
+                             port_bindings.insert(container_port, Some(vec![PortBinding {
+                                 host_ip: Some("0.0.0.0".to_string()),
+                                 host_port: Some(parts[0].to_string()),
+                             }]));
+                         }
+                    }
+
+                    let nano_cpus = if !cpu.is_empty() {
+                        cpu.parse::<f64>().ok().map(|v| (v * 1_000_000_000.0) as i64)
+                    } else { None };
+
+                    let memory_bytes = if !memory.is_empty() {
+                        let lower = memory.to_lowercase();
+                        if let Some(val) = lower.strip_suffix('m') {
+                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024)
+                        } else if let Some(val) = lower.strip_suffix('g') {
+                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
+                        } else if let Some(val) = lower.strip_suffix('k') {
+                            val.parse::<i64>().ok().map(|v| v * 1024)
+                        } else {
+                            lower.parse::<i64>().ok()
+                        }
+                    } else { None };
+
+                    let envs = if !env.is_empty() { Some(vec![env]) } else { None };
+                    
+                    let config = ContainerCreateBody {
+                        image: Some(image.clone()),
+                        exposed_ports: Some(exposed_ports),
+                        host_config: Some(HostConfig {
+                            port_bindings: Some(port_bindings),
+                            nano_cpus,
+                            memory: memory_bytes,
+                            ..Default::default()
+                        }),
+                        env: envs,
+                        ..Default::default()
+                    };
+
+                    let options = if !name.is_empty() {
+                        Some(CreateContainerOptions { name: Some(name.clone()), ..Default::default() })
+                    } else { None };
+
+                    match docker.create_container(options, config).await {
+                        Ok(res) => {
+                            let _ = tx_action_result.send(format!("Starting {}...", res.id)).await;
+                            match docker.start_container(&res.id, None::<StartContainerOptions>).await {
+                                Ok(_) => format!("Replaced container {}", &res.id[..12]),
+                                Err(e) => format!("Failed to start: {}", e),
+                            }
+                        },
+                        Err(e) => format!("Failed to create: {}", e),
                     }
                 }
             };
@@ -201,41 +425,210 @@ async fn main() -> Result<()> {
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        app.next();
-                        if let Some(c) = app.get_selected_container() {
-                            let _ = tx_target.send(Some(c.id.clone()));
+                    KeyCode::Char('q') => {
+                    if app.wizard.is_some() {
+                        app.toggle_wizard();
+                    } else {
+                        break;
+                    }
+                }
+                KeyCode::Char('c') | KeyCode::Tab => {
+                    if app.wizard.is_none() {
+                        app.toggle_wizard();
+                    }
+                }
+                KeyCode::Esc => {
+                    if app.wizard.is_some() {
+                        app.toggle_wizard();
+                    }
+                }
+                    _ => {
+                        if app.wizard.is_some() {
+                                if let Some(wizard_action) = app.wizard_handle_key(key.code) {
+                                    let action = match wizard_action {
+                                        app::WizardAction::Create { image, name, ports, env, cpu, memory } => Action::Create { image, name, ports, env, cpu, memory },
+                                        app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
+                                        app::WizardAction::ComposeUp { path } => Action::ComposeUp { path },
+                                        app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory } => Action::Replace { old_id, image, name, ports, env, cpu, memory },
+                                    };
+                                    let _ = tx_action.send(action).await;
+                                }
+                        } else {
+                            match key.code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    app.next();
+                                    if let Some(c) = app.get_selected_container() {
+                                        let _ = tx_target.send(Some(c.id.clone()));
+                                    }
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    app.previous();
+                                    if let Some(c) = app.get_selected_container() {
+                                        let _ = tx_target.send(Some(c.id.clone()));
+                                    }
+                                }
+                                KeyCode::Char('e') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        if let Some(inspect) = &app.current_inspection {
+                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
+                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
+                                            
+                                            let mut ports = String::new();
+                                            if let Some(network_settings) = &inspect.network_settings {
+                                                if let Some(bindings) = &network_settings.ports {
+                                                    for (k, v) in bindings {
+                                                        if let Some(list) = v {
+                                                            if let Some(binding) = list.first() {
+                                                                let host_port = &binding.host_port;
+                                                                let container_port = k.trim_end_matches("/tcp");
+                                                                ports = format!("{}:{}", host_port, container_port);
+                                                                break; // Just take first one for now
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            let mut env = String::new();
+                                            if let Some(config) = &inspect.config {
+                                                if let Some(envs) = &config.env {
+                                                    if let Some(first_env) = envs.first() {
+                                                        env = first_env.clone();
+                                                    }
+                                                }
+                                            }
+
+                                            let mut cpu = String::new();
+                                            let mut memory = String::new();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(nano) = host_config.nano_cpus {
+                                                    if nano > 0 {
+                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
+                                                    }
+                                                }
+                                                if let Some(mem) = host_config.memory {
+                                                    if mem > 0 {
+                                                        if mem % (1024 * 1024 * 1024) == 0 {
+                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
+                                                        } else if mem % (1024 * 1024) == 0 {
+                                                            memory = format!("{}m", mem / (1024 * 1024));
+                                                        } else if mem % 1024 == 0 {
+                                                            memory = format!("{}k", mem / 1024);
+                                                        } else {
+                                                            memory = format!("{}", mem);
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            app.wizard = Some(app::WizardState {
+                                                step: app::WizardStep::QuickRunInput {
+                                                    image,
+                                                    name,
+                                                    ports,
+                                                    env,
+                                                    cpu,
+                                                    memory,
+                                                    focused_field: 0,
+                                                    editing_id: Some(c.id.clone()),
+                                                },
+                                            });
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('b') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        if let Some(inspect) = &app.current_inspection {
+                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
+                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
+                                            
+                                            let mut ports = String::new();
+                                            if let Some(network_settings) = &inspect.network_settings {
+                                                if let Some(bindings) = &network_settings.ports {
+                                                    for (k, v) in bindings {
+                                                        if let Some(list) = v {
+                                                            if let Some(binding) = list.first() {
+                                                                let host_port = &binding.host_port;
+                                                                let container_port = k.trim_end_matches("/tcp");
+                                                                ports = format!("{}:{}", host_port, container_port);
+                                                                break; 
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            let mut env = String::new();
+                                            if let Some(config) = &inspect.config {
+                                                if let Some(envs) = &config.env {
+                                                    if let Some(first_env) = envs.first() {
+                                                        env = first_env.clone();
+                                                    }
+                                                }
+                                            }
+
+                                            let mut cpu = String::new();
+                                            let mut memory = String::new();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(nano) = host_config.nano_cpus {
+                                                    if nano > 0 {
+                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
+                                                    }
+                                                }
+                                                if let Some(mem) = host_config.memory {
+                                                    if mem > 0 {
+                                                        if mem % (1024 * 1024 * 1024) == 0 {
+                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
+                                                        } else if mem % (1024 * 1024) == 0 {
+                                                            memory = format!("{}m", mem / (1024 * 1024));
+                                                        } else if mem % 1024 == 0 {
+                                                            memory = format!("{}k", mem / 1024);
+                                                        } else {
+                                                            memory = format!("{}", mem);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            let action = Action::Replace {
+                                                old_id: c.id.clone(),
+                                                image,
+                                                name,
+                                                ports,
+                                                env,
+                                                cpu,
+                                                memory,
+                                            };
+                                            let _ = tx_action.send(action).await;
+                                            app.set_action_status("Rebuilding container...".to_string());
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('r') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        let id = c.id.clone();
+                                        app.set_action_status("Restarting...".to_string());
+                                        let _ = tx_action.send(Action::Restart(id)).await;
+                                    }
+                                }
+                                KeyCode::Char('s') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        let id = c.id.clone();
+                                        app.set_action_status("Stopping...".to_string());
+                                        let _ = tx_action.send(Action::Stop(id)).await;
+                                    }
+                                }
+                                KeyCode::Char('u') => { // 'u' for Up/Start
+                                    if let Some(c) = app.get_selected_container() {
+                                        let id = c.id.clone();
+                                        app.set_action_status("Starting...".to_string());
+                                        let _ = tx_action.send(Action::Start(id)).await;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.previous();
-                        if let Some(c) = app.get_selected_container() {
-                            let _ = tx_target.send(Some(c.id.clone()));
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        if let Some(c) = app.get_selected_container() {
-                            let id = c.id.clone();
-                            app.set_action_status("Restarting...".to_string());
-                            let _ = tx_action.send(Action::Restart(id)).await;
-                        }
-                    }
-                    KeyCode::Char('s') => {
-                        if let Some(c) = app.get_selected_container() {
-                            let id = c.id.clone();
-                            app.set_action_status("Stopping...".to_string());
-                            let _ = tx_action.send(Action::Stop(id)).await;
-                        }
-                    }
-                    KeyCode::Char('u') => { // 'u' for Up/Start
-                        if let Some(c) = app.get_selected_container() {
-                            let id = c.id.clone();
-                            app.set_action_status("Starting...".to_string());
-                            let _ = tx_action.send(Action::Start(id)).await;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
@@ -316,10 +709,16 @@ async fn main() -> Result<()> {
             // Update Action Results
             while let Ok(msg) = rx_action_result.try_recv() {
                 app.set_action_status(msg);
+                // If we receive a result, it means the action is done.
+                // We should close the wizard if it's open.
+                if app.wizard.is_some() {
+                    app.toggle_wizard();
+                }
             }
             
             app.clear_action_status();
             app.update_fish();
+            app.update_wizard_spinner();
 
             last_tick = std::time::Instant::now();
         }

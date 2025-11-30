@@ -68,8 +68,20 @@ pub struct ContainerInspection {
     pub args: Option<Vec<String>>,
     #[serde(rename = "Config")]
     pub config: Option<ContainerConfig>,
+    #[serde(rename = "Name")]
+    pub name: Option<String>,
     #[serde(rename = "NetworkSettings")]
     pub network_settings: Option<NetworkSettings>,
+    #[serde(rename = "HostConfig")]
+    pub host_config: Option<HostConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HostConfig {
+    #[serde(rename = "NanoCpus")]
+    pub nano_cpus: Option<i64>,
+    #[serde(rename = "Memory")]
+    pub memory: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
