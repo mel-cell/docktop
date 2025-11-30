@@ -1,7 +1,9 @@
+#![allow(dead_code)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use serde::Deserialize;
 use anyhow::Result;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Container {
@@ -38,8 +40,50 @@ pub struct CpuUsage {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryStats {
-    pub usage: u64,
-    pub limit: u64,
+    pub usage: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ContainerInspection {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Created")]
+    pub created: Option<String>,
+    #[serde(rename = "Path")]
+    pub path: Option<String>,
+    #[serde(rename = "Args")]
+    pub args: Option<Vec<String>>,
+    #[serde(rename = "Config")]
+    pub config: Option<ContainerConfig>,
+    #[serde(rename = "NetworkSettings")]
+    pub network_settings: Option<NetworkSettings>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ContainerConfig {
+    #[serde(rename = "Image")]
+    pub image: String,
+    #[serde(rename = "Cmd")]
+    pub cmd: Option<Vec<String>>,
+    #[serde(rename = "Env")]
+    pub env: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NetworkSettings {
+    #[serde(rename = "Ports")]
+    pub ports: Option<HashMap<String, Option<Vec<PortBinding>>>>,
+    #[serde(rename = "IPAddress")]
+    pub ip_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PortBinding {
+    #[serde(rename = "HostIp")]
+    pub host_ip: String,
+    #[serde(rename = "HostPort")]
+    pub host_port: String,
 }
 
 pub struct DockerClient {
@@ -64,23 +108,55 @@ impl DockerClient {
         
         let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
         if parts.len() < 2 {
-            return Err(anyhow::anyhow!("Invalid response from Docker daemon"));
+            return Err(anyhow::anyhow!("Invalid response from Docker daemon: {}", response_str.chars().take(100).collect::<String>()));
         }
         
         Ok(parts[1].to_string())
     }
 
     pub async fn list_containers(&self) -> Result<Vec<Container>> {
-        let request = "GET /containers/json?all=true HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        let request = "GET /containers/json?all=true HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         let body = self.send_request(request).await?;
         let containers: Vec<Container> = serde_json::from_str(&body)?;
         Ok(containers)
     }
 
     pub async fn get_stats(&self, container_id: &str) -> Result<ContainerStats> {
-        let request = format!("GET /containers/{}/stats?stream=false HTTP/1.0\r\nHost: localhost\r\n\r\n", container_id);
+        let request = format!("GET /containers/{}/stats?stream=false HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", container_id);
         let body = self.send_request(&request).await?;
         let stats: ContainerStats = serde_json::from_str(&body)?;
         Ok(stats)
+    }
+
+    pub async fn inspect_container(&self, container_id: &str) -> Result<ContainerInspection> {
+        let request = format!("GET /containers/{}/json HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n", container_id);
+        let body = self.send_request(&request).await?;
+        let inspection: ContainerInspection = serde_json::from_str(&body)?;
+        Ok(inspection)
+    }
+
+    pub async fn get_logs_stream(&self, container_id: &str) -> Result<UnixStream> {
+        let mut stream = UnixStream::connect(&self.socket_path).await?;
+        let request = format!(
+            "GET /containers/{}/logs?stdout=true&stderr=true&tail=50&follow=true HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", 
+            container_id
+        );
+        stream.write_all(request.as_bytes()).await?;
+
+        // Consume HTTP headers
+        let mut buffer = [0u8; 1];
+        let mut headers = Vec::new();
+        loop {
+            stream.read_exact(&mut buffer).await?;
+            headers.push(buffer[0]);
+            
+            if headers.len() >= 4 {
+                if &headers[headers.len()-4..] == b"\r\n\r\n" {
+                    break;
+                }
+            }
+        }
+
+        Ok(stream)
     }
 }

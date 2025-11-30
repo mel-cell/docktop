@@ -25,6 +25,6 @@ cargo run
 
 - [x] Phase 0: Foundation (Docker Socket Connection)
 - [x] Phase 1: MVP 1 (List & Stats)
-- [ ] Phase 2: MVP 2 (Inspector & Logs)
+- [x] Phase 2: MVP 2 (Inspector & Logs)
 - [ ] Phase 3: MVP 3 (Control: Start/Stop/Restart)
 - [ ] Phase 4: Polish (Graphs & Themes)

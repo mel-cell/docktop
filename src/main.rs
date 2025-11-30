@@ -7,13 +7,14 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, watch};
+use tokio::io::AsyncReadExt;
 
 mod app;
 mod docker;
 mod ui;
 
 use app::App;
-use docker::DockerClient;
+use docker::{Container, ContainerStats, ContainerInspection, DockerClient};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,40 +26,145 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Channels
-    let (tx_data, mut rx_data) = mpsc::channel(10);
+    let (tx_containers, mut rx_containers) = mpsc::channel::<Vec<Container>>(10);
+    let (tx_details, mut rx_details) = mpsc::channel::<(Option<ContainerStats>, Option<ContainerInspection>)>(10);
+    let (tx_logs, mut rx_logs) = mpsc::channel::<String>(100);
     let (tx_target, rx_target) = watch::channel::<Option<String>>(None);
 
-    // Docker Client Task
+    // Docker Client (Shared)
     let docker_client = std::sync::Arc::new(DockerClient::new());
-    let client_clone = docker_client.clone();
     
-    let mut rx_target_clone = rx_target.clone();
-    
+    // Task 1: Container Lister (Fast Loop)
+    let client_clone1 = docker_client.clone();
     tokio::spawn(async move {
-        let mut rx_target = rx_target_clone;
         loop {
-            let containers_res = client_clone.list_containers().await;
-            let target_id = rx_target.borrow_and_update().clone();
-            
-            let stats = if let Some(id) = target_id {
-                 client_clone.get_stats(&id).await.ok()
-            } else {
-                None
-            };
-
-            if let Ok(containers) = containers_res {
-                if tx_data.send((containers, stats)).await.is_err() {
+            if let Ok(containers) = client_clone1.list_containers().await {
+                if tx_containers.send(containers).await.is_err() {
                     break;
                 }
             }
-            
             tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    // Task 2: Details Fetcher (On Demand + Slow Loop)
+    let client_clone2 = docker_client.clone();
+    let mut rx_target_details = rx_target.clone();
+    tokio::spawn(async move {
+        let mut last_fetch = std::time::Instant::now();
+        loop {
+            // Check if target changed OR 2 seconds passed
+            let target_changed = rx_target_details.has_changed().unwrap_or(false);
+            let time_to_update = last_fetch.elapsed() >= Duration::from_secs(2);
+            
+            if target_changed || time_to_update {
+                if target_changed {
+                    let _ = rx_target_details.borrow_and_update(); // Mark as seen
+                }
+                
+                let target_id = rx_target_details.borrow().clone();
+                if let Some(id) = target_id {
+                    let stats = client_clone2.get_stats(&id).await.ok();
+                    let inspect = client_clone2.inspect_container(&id).await.ok();
+                    
+                    if tx_details.send((stats, inspect)).await.is_err() {
+                        break;
+                    }
+                    last_fetch = std::time::Instant::now();
+                }
+            }
+            
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    // Task 3: Log Streamer
+    let client_clone3 = docker_client.clone();
+    let mut rx_target_logger = rx_target.clone();
+
+    tokio::spawn(async move {
+        let mut current_log_task: Option<tokio::task::JoinHandle<()>> = None;
+        let mut last_id: Option<String> = None;
+
+        loop {
+            if rx_target_logger.changed().await.is_err() { break; }
+            let new_id = rx_target_logger.borrow().clone();
+
+            if new_id != last_id {
+                if let Some(task) = current_log_task.take() {
+                    task.abort();
+                }
+                
+                if let Some(id) = new_id.clone() {
+                    let client = client_clone3.clone();
+                    let tx = tx_logs.clone();
+                    
+                    current_log_task = Some(tokio::spawn(async move {
+                        if let Ok(mut stream) = client.get_logs_stream(&id).await {
+                             // Peek first 8 bytes to detect Multiplexing vs TTY
+                             let mut header = [0u8; 8];
+                             if stream.read_exact(&mut header).await.is_err() { return; }
+                             
+                             // Docker Multiplex Header: [StreamType(1), 0, 0, 0, Size(4 bytes)]
+                             let is_multiplexed = header[0] <= 2 && header[1] == 0 && header[2] == 0 && header[3] == 0;
+                             
+                             if is_multiplexed {
+                                 // Handle first chunk
+                                 let size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                                 if size < 10_000_000 {
+                                     let mut payload = vec![0u8; size];
+                                     if stream.read_exact(&mut payload).await.is_ok() {
+                                         let line = String::from_utf8_lossy(&payload).to_string();
+                                         for l in line.lines() { if tx.send(l.to_string()).await.is_err() { return; } }
+                                     }
+                                 }
+                                 
+                                 // Loop for the rest
+                                 loop {
+                                     if stream.read_exact(&mut header).await.is_err() { break; }
+                                     let size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                                     if size > 10_000_000 { break; } // Sanity check
+                                     
+                                     let mut payload = vec![0u8; size];
+                                     if stream.read_exact(&mut payload).await.is_err() { break; }
+                                     
+                                     let line = String::from_utf8_lossy(&payload).to_string();
+                                     for l in line.lines() {
+                                         if tx.send(l.to_string()).await.is_err() { return; }
+                                     }
+                                 }
+                             } else {
+                                 // TTY Mode: Treat header as data
+                                 let chunk = String::from_utf8_lossy(&header).to_string();
+                                 if tx.send(chunk).await.is_err() { return; }
+                                 
+                                 // Read rest as raw stream
+                                 let mut buffer = [0u8; 1024];
+                                 loop {
+                                     match stream.read(&mut buffer).await {
+                                         Ok(0) => break,
+                                         Ok(n) => {
+                                             let s = String::from_utf8_lossy(&buffer[..n]).to_string();
+                                             // Simple split by newline to avoid huge single lines
+                                             for line in s.split_inclusive('\n') {
+                                                 if tx.send(line.to_string()).await.is_err() { return; }
+                                             }
+                                         }
+                                         Err(_) => break,
+                                     }
+                                 }
+                             }
+                        }
+                    }));
+                }
+                last_id = new_id;
+            }
         }
     });
 
     // App State
     let mut app = App::new();
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(100); // Faster tick for smoother UI
     let mut last_tick = std::time::Instant::now();
 
     loop {
@@ -90,28 +196,33 @@ async fn main() -> Result<()> {
         }
 
         if last_tick.elapsed() >= tick_rate {
-            // Check for data updates
-            while let Ok((containers, stats)) = rx_data.try_recv() {
+            // Update Containers
+            while let Ok(containers) = rx_containers.try_recv() {
                 app.containers = containers;
-                app.current_stats = stats;
-                
-                // Ensure selected index is valid
-                if app.selected_index >= app.containers.len() && !app.containers.is_empty() {
-                    app.selected_index = app.containers.len() - 1;
-                }
-                
-                // If we have no selection but we have containers, select the first one and notify backend
+                // Initial selection logic
                 if app.containers.len() > 0 && rx_target.borrow().is_none() {
                      if let Some(c) = app.get_selected_container() {
                         let _ = tx_target.send(Some(c.id.clone()));
                     }
                 }
             }
+
+            // Update Details
+            while let Ok((stats, inspect)) = rx_details.try_recv() {
+                app.current_stats = stats;
+                app.current_inspection = inspect;
+                app.is_loading_details = false;
+            }
+
+            // Update Logs
+            while let Ok(log) = rx_logs.try_recv() {
+                app.add_log(log);
+            }
+
             last_tick = std::time::Instant::now();
         }
     }
 
-    // Cleanup
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
