@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::io::AsyncReadExt;
 
 mod app;
+mod config;
 mod docker;
 mod ui;
 
@@ -187,7 +188,7 @@ async fn main() -> Result<()> {
 
     // App State
     let mut app = App::new();
-    let tick_rate = Duration::from_millis(100);
+    let tick_rate = Duration::from_millis(200);
     let mut last_tick = std::time::Instant::now();
 
     loop {
@@ -259,6 +260,52 @@ async fn main() -> Result<()> {
                 app.current_stats = stats;
                 app.current_inspection = inspect;
                 app.is_loading_details = false;
+
+                // Update CPU & Network History
+                // We need to clone stats or extract values to avoid borrowing app twice
+                let (cpu, rx, tx) = if let Some(stats) = &app.current_stats {
+                    let cpu = ui::calculate_cpu_usage(stats, &app.previous_stats);
+                    
+                    let (rx, tx) = if let Some(nets) = &stats.networks {
+                        let mut total_rx = 0.0;
+                        let mut total_tx = 0.0;
+                        for (_, net) in nets {
+                            total_rx += net.rx_bytes as f64;
+                            total_tx += net.tx_bytes as f64;
+                        }
+                        
+                        if let Some(prev) = &app.previous_stats {
+                            if let Some(prev_nets) = &prev.networks {
+                                let mut prev_rx = 0.0;
+                                let mut prev_tx = 0.0;
+                                for (_, net) in prev_nets {
+                                    prev_rx += net.rx_bytes as f64;
+                                    prev_tx += net.tx_bytes as f64;
+                                }
+                                (total_rx - prev_rx, total_tx - prev_tx)
+                            } else {
+                                (0.0, 0.0)
+                            }
+                        } else {
+                            (0.0, 0.0)
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    
+                    (Some(cpu), Some(rx), Some(tx))
+                } else {
+                    (None, None, None)
+                };
+
+                if let Some(c) = cpu {
+                    app.update_cpu_history(c);
+                }
+                if let Some(r) = rx {
+                    if let Some(t) = tx {
+                        app.update_net_history(r, t);
+                    }
+                }
             }
 
             // Update Logs
@@ -272,6 +319,7 @@ async fn main() -> Result<()> {
             }
             
             app.clear_action_status();
+            app.update_fish();
 
             last_tick = std::time::Instant::now();
         }

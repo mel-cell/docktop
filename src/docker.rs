@@ -19,12 +19,7 @@ pub struct Container {
     pub status: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct ContainerStats {
-    pub cpu_stats: CpuStats,
-    pub precpu_stats: CpuStats,
-    pub memory_stats: MemoryStats,
-}
+
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CpuStats {
@@ -42,6 +37,23 @@ pub struct CpuUsage {
 pub struct MemoryStats {
     pub usage: Option<u64>,
     pub limit: Option<u64>,
+    pub stats: Option<HashMap<String, u64>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ContainerStats {
+    pub cpu_stats: CpuStats,
+    pub precpu_stats: CpuStats,
+    pub memory_stats: MemoryStats,
+    pub networks: Option<HashMap<String, NetworkStats>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NetworkStats {
+    #[serde(rename = "rx_bytes")]
+    pub rx_bytes: u64,
+    #[serde(rename = "tx_bytes")]
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
