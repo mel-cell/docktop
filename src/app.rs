@@ -164,26 +164,26 @@ impl App {
         }
 
         let mut globe_frames = Vec::new();
-        if let Ok(content) = std::fs::read_to_string("assets/ earthAnimation.bat") {
-            let chunks: Vec<&str> = content.split("cls").collect();
-            for chunk in chunks.iter().skip(1) {
-                let mut frame = Vec::new();
-                for line in chunk.lines() {
-                    let trimmed_start = line.trim_start();
-                    if trimmed_start.to_lowercase().starts_with("echo") {
-                        if let Some(idx) = line.to_lowercase().find("echo") {
-                            let content = &line[idx+4..];
-                            let mut frame_line = content.to_string();
-                            if frame_line.starts_with(' ') || frame_line.starts_with('.') {
-                                frame_line.remove(0);
-                            }
-                            frame.push(frame_line);
+        let content = include_str!("../assets/ earthAnimation.bat");
+        
+        let chunks: Vec<&str> = content.split("cls").collect();
+        for chunk in chunks.iter().skip(1) {
+            let mut frame = Vec::new();
+            for line in chunk.lines() {
+                let trimmed_start = line.trim_start();
+                if trimmed_start.to_lowercase().starts_with("echo") {
+                    if let Some(idx) = line.to_lowercase().find("echo") {
+                        let content = &line[idx+4..];
+                        let mut frame_line = content.to_string();
+                        if frame_line.starts_with(' ') || frame_line.starts_with('.') {
+                            frame_line.remove(0);
                         }
+                        frame.push(frame_line);
                     }
                 }
-                if !frame.is_empty() {
-                    globe_frames.push(frame);
-                }
+            }
+            if !frame.is_empty() {
+                globe_frames.push(frame);
             }
         }
         
