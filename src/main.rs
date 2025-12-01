@@ -9,7 +9,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, watch};
 use tokio::io::AsyncReadExt;
 use bollard::Docker;
-use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions};
+use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions, ListImagesOptions, ListVolumesOptions, ListContainersOptions, RemoveImageOptions, RemoveVolumeOptions};
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
 use futures_util::stream::StreamExt;
 use http_body_util::Full;
@@ -33,6 +33,8 @@ enum Action {
     Build { tag: String, path: std::path::PathBuf, mount: bool },
     ComposeUp { path: std::path::PathBuf },
     Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
+    ScanJanitor,
+    CleanJanitor(Vec<app::JanitorItem>),
 }
 
 #[tokio::main]
@@ -51,6 +53,7 @@ async fn main() -> Result<()> {
     let (tx_target, rx_target) = watch::channel::<Option<String>>(None);
     let (tx_action, mut rx_action) = mpsc::channel::<Action>(10);
     let (tx_action_result, mut rx_action_result) = mpsc::channel::<String>(10);
+    let (tx_janitor_items, mut rx_janitor_items) = mpsc::channel::<Vec<app::JanitorItem>>(10);
 
     // Docker Client (Shared)
     let docker_client = std::sync::Arc::new(DockerClient::new());
@@ -174,6 +177,96 @@ async fn main() -> Result<()> {
         let docker = Docker::connect_with_local_defaults().unwrap();
         while let Some(action) = rx_action.recv().await {
             let res = match action {
+                Action::ScanJanitor => {
+                    let _ = tx_action_result.send("Scanning for junk...".to_string()).await;
+                    let mut items = Vec::new();
+                    
+                    // 1. Dangling Images
+                    let mut filters = std::collections::HashMap::new();
+                    filters.insert("dangling".to_string(), vec!["true".to_string()]);
+                    
+                    if let Ok(images) = docker.list_images(Some(ListImagesOptions {
+                        filters: Some(filters),
+                        ..Default::default()
+                    })).await {
+                        for img in images {
+                            items.push(app::JanitorItem {
+                                id: img.id.clone(),
+                                name: "<none>".to_string(),
+                                kind: app::JanitorItemKind::Image,
+                                size: img.size as u64,
+                                age: "Unknown".to_string(),
+                                selected: true,
+                            });
+                        }
+                    }
+
+                    // 2. Unused Volumes
+                    let mut filters = std::collections::HashMap::new();
+                    filters.insert("dangling".to_string(), vec!["true".to_string()]);
+
+                    if let Ok(volumes) = docker.list_volumes(Some(ListVolumesOptions {
+                        filters: Some(filters),
+                    })).await {
+                        if let Some(vols) = volumes.volumes {
+                            for vol in vols {
+                                items.push(app::JanitorItem {
+                                    id: vol.name.clone(),
+                                    name: vol.name.clone(),
+                                    kind: app::JanitorItemKind::Volume,
+                                    size: 0,
+                                    age: "-".to_string(),
+                                    selected: false,
+                                });
+                            }
+                        }
+                    }
+
+                    // 3. Stopped Containers
+                    let mut filters = std::collections::HashMap::new();
+                    filters.insert("status".to_string(), vec!["exited".to_string(), "dead".to_string()]);
+
+                    if let Ok(containers) = docker.list_containers(Some(ListContainersOptions {
+                        all: true,
+                        filters: Some(filters),
+                        ..Default::default()
+                    })).await {
+                        for c in containers {
+                            items.push(app::JanitorItem {
+                                id: c.id.unwrap_or_default(),
+                                name: c.names.unwrap_or_default().first().cloned().unwrap_or_default(),
+                                kind: app::JanitorItemKind::Container,
+                                size: 0, // Container size requires size=true in list which is slow
+                                age: c.status.unwrap_or_default(),
+                                selected: true,
+                            });
+                        }
+                    }
+                    
+                    let _ = tx_janitor_items.send(items).await;
+                    "Scan Complete".to_string()
+                }
+                Action::CleanJanitor(items) => {
+                    let mut count = 0;
+                    for item in items {
+                        match item.kind {
+                            app::JanitorItemKind::Image => {
+                                let _ = docker.remove_image(&item.id, None::<RemoveImageOptions>, None).await;
+                            },
+                            app::JanitorItemKind::Volume => {
+                                let _ = docker.remove_volume(&item.id, None::<RemoveVolumeOptions>).await;
+                            },
+                            app::JanitorItemKind::Container => {
+                                let _ = docker.remove_container(&item.id, None::<RemoveContainerOptions>).await;
+                            },
+                        }
+                        count += 1;
+                        if count % 5 == 0 {
+                             let _ = tx_action_result.send(format!("Cleaned {} items...", count)).await;
+                        }
+                    }
+                    format!("Janitor finished. Removed {} items.", count)
+                }
                 Action::Start(id) => {
                     match docker.start_container(&id, None::<StartContainerOptions>).await {
                         Ok(_) => format!("Started container {}", &id[..12]),
@@ -450,6 +543,8 @@ async fn main() -> Result<()> {
                                         app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
                                         app::WizardAction::ComposeUp { path } => Action::ComposeUp { path },
                                         app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory } => Action::Replace { old_id, image, name, ports, env, cpu, memory },
+                                        app::WizardAction::ScanJanitor => Action::ScanJanitor,
+                                        app::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
                                     };
                                     let _ = tx_action.send(action).await;
                                 }
@@ -531,6 +626,7 @@ async fn main() -> Result<()> {
                                                     memory,
                                                     focused_field: 0,
                                                     editing_id: Some(c.id.clone()),
+                                                    port_status: app::PortStatus::None,
                                                 },
                                             });
                                         }
@@ -707,12 +803,28 @@ async fn main() -> Result<()> {
             }
 
             // Update Action Results
-            while let Ok(msg) = rx_action_result.try_recv() {
+            if let Ok(msg) = rx_action_result.try_recv() {
+                let is_scan_complete = msg == "Scan Complete";
                 app.set_action_status(msg);
                 // If we receive a result, it means the action is done.
                 // We should close the wizard if it's open.
                 if app.wizard.is_some() {
-                    app.toggle_wizard();
+                    // Only close if not Janitor scanning (which keeps wizard open but updates state)
+                    // Actually we want to close wizard after CleanJanitor but not ScanJanitor
+                    // But ScanJanitor returns "Scan Complete" string.
+                    if !is_scan_complete {
+                         app.toggle_wizard();
+                    }
+                }
+            }
+
+            // Update Janitor Items
+            while let Ok(items) = rx_janitor_items.try_recv() {
+                if let Some(wizard) = &mut app.wizard {
+                    if let app::WizardStep::Janitor { items: ref mut current_items, loading, .. } = &mut wizard.step {
+                        *current_items = items;
+                        *loading = false;
+                    }
                 }
             }
             

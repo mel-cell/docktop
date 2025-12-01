@@ -492,7 +492,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let help = Paragraph::new("UP/DOWN: Navigate | ENTER: Select | ESC: Cancel").style(Style::default().fg(Color::DarkGray));
             f.render_widget(help, help_area[1]);
         },
-        crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id } => {
+        crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id, port_status } => {
             let title = if editing_id.is_some() { "Edit Container" } else { "Quick Pull & Run" };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -526,15 +526,25 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
+                let mut title_text = label.to_string();
+                if i == 2 { // Ports field
+                    match port_status {
+                        crate::app::PortStatus::Available => title_text.push_str(" [OK]"),
+                        crate::app::PortStatus::Occupied(who) => title_text.push_str(&format!(" [BUSY: {}]", who)),
+                        crate::app::PortStatus::Invalid => title_text.push_str(" [INVALID]"),
+                        _ => {}
+                    }
+                }
+
                 let p = Paragraph::new(value.as_str())
-                    .block(Block::default().borders(Borders::ALL).title(*label).border_style(style));
+                    .block(Block::default().borders(Borders::ALL).title(title_text).border_style(style));
                 f.render_widget(p, chunks[i+1]);
             }
             
             let help = Paragraph::new("ENTER: Create/Update | TAB: Next Field").style(Style::default().fg(Color::DarkGray));
             f.render_widget(help, chunks[7]);
         },
-        crate::app::WizardStep::FileBrowser { current_path, selected_file_index, entries, mode } => {
+        crate::app::WizardStep::FileBrowser { current_path, list_state, entries, mode } => {
              let title = match mode {
                  crate::app::FileBrowserMode::Build => "Select Project (Dockerfile)",
                  crate::app::FileBrowserMode::Compose => "Select Compose File",
@@ -543,7 +553,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
              let items: Vec<ListItem> = entries.iter().enumerate().map(|(i, path)| {
                  let name = path.file_name().unwrap_or_default().to_string_lossy();
                  let icon = if path.is_dir() { "[D] " } else { "[F] " };
-                 let style = if i == *selected_file_index {
+                 let style = if Some(i) == list_state.selected() {
                      Style::default().fg(Color::White).bg(Color::DarkGray)
                  } else {
                      Style::default().fg(Color::Gray)
@@ -552,8 +562,8 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
              }).collect();
 
              let instructions = match mode {
-                 crate::app::FileBrowserMode::Build => " SPACE: Detect Framework | ENTER: Open/Select ",
-                 crate::app::FileBrowserMode::Compose => " SPACE: Generate/Skip | ENTER: Open/Select ",
+                 crate::app::FileBrowserMode::Build => " SPACE: Detect Framework | ENTER: Open/Select | BACKSPACE: Go Back ",
+                 crate::app::FileBrowserMode::Compose => " SPACE: Generate/Skip | ENTER: Open/Select | BACKSPACE: Go Back ",
              };
 
              let list = List::new(items)
@@ -562,9 +572,11 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                     .title(format!("{} - {}", title, current_path.display()))
                     .title_bottom(instructions)
                     .border_style(Style::default().fg(Color::Gray)));
-             f.render_widget(list, inner);
+             
+             let mut state = list_state.clone();
+             f.render_stateful_widget(list, inner, &mut state);
         },
-        crate::app::WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option } => {
+        crate::app::WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
              let title = " Dockerfile Generator ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -597,8 +609,16 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             f.render_widget(framework_p, chunks[2]);
 
             let port_style = if *editing_port || *focused_option == 1 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
+            let mut port_title = "Port (Press 'p' to edit)".to_string();
+            match port_status {
+                crate::app::PortStatus::Available => port_title.push_str(" [OK]"),
+                crate::app::PortStatus::Occupied(who) => port_title.push_str(&format!(" [BUSY: {}]", who)),
+                crate::app::PortStatus::Invalid => port_title.push_str(" [INVALID]"),
+                _ => {}
+            }
+
             let port_p = Paragraph::new(port.as_str())
-                .block(Block::default().borders(Borders::ALL).title("Port (Press 'p' to edit)").border_style(port_style));
+                .block(Block::default().borders(Borders::ALL).title(port_title).border_style(port_style));
             f.render_widget(port_p, chunks[3]);
 
             let options = vec![
@@ -777,6 +797,77 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let help = Paragraph::new("UP/DOWN: Navigate | S: Auto-Calculate | ENTER: Next/Generate | ESC: Back")
                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[4]);
+        },
+        crate::app::WizardStep::Janitor { items, list_state, loading } => {
+             let title = " Janitor - Cleanup ";
+             let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title
+                    Constraint::Min(1),    // List
+                    Constraint::Length(3), // Summary
+                    Constraint::Length(1), // Help
+                ])
+                .split(inner);
+
+            let title_p = Paragraph::new(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            f.render_widget(title_p, chunks[0]);
+
+            if *loading {
+                let p = Paragraph::new("Scanning system for unused resources...").alignment(ratatui::layout::Alignment::Center);
+                f.render_widget(p, chunks[1]);
+            } else {
+                let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, item)| {
+                    let check = if item.selected { "[x]" } else { "[ ]" };
+                    let kind_str = match item.kind {
+                        crate::app::JanitorItemKind::Image => "IMG",
+                        crate::app::JanitorItemKind::Volume => "VOL",
+                        crate::app::JanitorItemKind::Container => "CON",
+                    };
+                    
+                    let size_str = if item.size > 0 {
+                        let s = item.size as f64;
+                        if s > 1024.0 * 1024.0 * 1024.0 {
+                            format!("{:.2} GB", s / 1024.0 / 1024.0 / 1024.0)
+                        } else {
+                            format!("{:.1} MB", s / 1024.0 / 1024.0)
+                        }
+                    } else {
+                        "-".to_string()
+                    };
+
+                    let content = format!("{} {} | {:<3} | {:<10} | {:<15} | {}", check, item.id.chars().take(12).collect::<String>(), kind_str, size_str, item.age, item.name);
+                    
+                    let style = if Some(i) == list_state.selected() {
+                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(content).style(style)
+                }).collect();
+
+                let mut state = list_state.clone();
+                let list = List::new(list_items)
+                    .block(Block::default().borders(Borders::ALL).title("Junk Items").border_style(Style::default().fg(Color::DarkGray)));
+                f.render_stateful_widget(list, chunks[1], &mut state);
+
+                // Summary
+                let total_size: u64 = items.iter().filter(|i| i.selected).map(|i| i.size).sum();
+                let total_str = if total_size > 1024 * 1024 * 1024 {
+                    format!("{:.2} GB", total_size as f64 / 1024.0 / 1024.0 / 1024.0)
+                } else {
+                    format!("{:.1} MB", total_size as f64 / 1024.0 / 1024.0)
+                };
+
+                let summary = Paragraph::new(format!("Potential Space Reclaimed: {}", total_str))
+                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Green)))
+                    .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+                f.render_widget(summary, chunks[2]);
+            }
+
+            let help = Paragraph::new("SPACE: Toggle | UP/DOWN: Navigate | ENTER: Clean Selected | ESC: Cancel")
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+            f.render_widget(help, chunks[3]);
         },
         crate::app::WizardStep::BuildConf { tag, mount_volume, focused_field, .. } => {
              let layout = Layout::default()

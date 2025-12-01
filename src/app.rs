@@ -4,10 +4,36 @@ use crate::config::Config;
 use std::collections::VecDeque;
 use std::fs;
 use sysinfo::System;
+use ratatui::widgets::ListState;
 
 #[derive(Clone)]
 pub struct WizardState {
     pub step: WizardStep,
+}
+
+#[derive(Clone, Debug)]
+pub struct JanitorItem {
+    pub id: String,
+    pub name: String,
+    pub kind: JanitorItemKind,
+    pub size: u64,
+    pub age: String,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum JanitorItemKind {
+    Image,
+    Volume,
+    Container,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum PortStatus {
+    None,
+    Available,
+    Occupied(String), // Process info
+    Invalid,
 }
 
 #[derive(Clone, PartialEq)]
@@ -68,10 +94,11 @@ pub enum WizardStep {
         memory: String,
         focused_field: usize,
         editing_id: Option<String>,
+        port_status: PortStatus,
     },
     FileBrowser {
         current_path: std::path::PathBuf,
-        selected_file_index: usize,
+        list_state: ListState,
         entries: Vec<std::path::PathBuf>,
         mode: FileBrowserMode,
     },
@@ -83,6 +110,7 @@ pub enum WizardStep {
         port: String,
         editing_port: bool,
         focused_option: usize,
+        port_status: PortStatus,
     },
     BuildConf {
         tag: String,
@@ -111,6 +139,11 @@ pub enum WizardStep {
         detected_cpu: usize,
         detected_mem: u64,
     },
+    Janitor {
+        items: Vec<JanitorItem>,
+        list_state: ListState,
+        loading: bool,
+    },
     Error(String),
 }
 
@@ -120,6 +153,8 @@ pub enum WizardAction {
     Build { tag: String, path: std::path::PathBuf, mount: bool },
     ComposeUp { path: std::path::PathBuf },
     Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
+    ScanJanitor,
+    CleanJanitor(Vec<JanitorItem>),
 }
 
 #[derive(Clone)]
@@ -402,6 +437,60 @@ impl App {
         Framework::Manual
     }
 
+    pub fn check_port(port_input: &str) -> PortStatus {
+        if port_input.is_empty() { return PortStatus::None; }
+        
+        let port_part = if let Some(idx) = port_input.find(':') {
+            &port_input[..idx]
+        } else {
+            port_input
+        };
+
+        if let Ok(port) = port_part.parse::<u16>() {
+            match std::net::TcpListener::bind(("0.0.0.0", port)) {
+                Ok(_) => PortStatus::Available,
+                Err(_) => {
+                    // Port is taken. Try to find who has it.
+                    // Try lsof first
+                    let output = std::process::Command::new("lsof")
+                        .arg("-i")
+                        .arg(&format!(":{}", port))
+                        .arg("-t") // Terse mode, just PIDs
+                        .output();
+                    
+                    if let Ok(o) = output {
+                        if !o.stdout.is_empty() {
+                            let pid_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            // If multiple lines, take first
+                            let pid_str = pid_str.lines().next().unwrap_or("");
+                            if let Ok(pid) = pid_str.parse::<i32>() {
+                                // We can use sysinfo here if we had access to self.system, but this is a static/helper method?
+                                // Actually we can just return the PID and let UI resolve it or just return PID.
+                                // Or we can instantiate a temporary System to look it up, but that's heavy.
+                                // Let's just return "PID: <pid>"
+                                // Better: run `ps -p <pid> -o comm=`
+                                let ps_out = std::process::Command::new("ps")
+                                    .arg("-p")
+                                    .arg(pid_str)
+                                    .arg("-o")
+                                    .arg("comm=")
+                                    .output();
+                                if let Ok(ps_o) = ps_out {
+                                    let name = String::from_utf8_lossy(&ps_o.stdout).trim().to_string();
+                                    return PortStatus::Occupied(format!("{} (PID: {})", name, pid));
+                                }
+                                return PortStatus::Occupied(format!("PID: {}", pid));
+                            }
+                        }
+                    }
+                    PortStatus::Occupied("Unknown Process".to_string())
+                }
+            }
+        } else {
+            PortStatus::Invalid
+        }
+    }
+
     fn write_advanced_compose_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<()> {
         if !path.exists() {
             std::fs::create_dir_all(path)?;
@@ -549,8 +638,8 @@ CMD ["app"]
             match &mut wizard.step {
                 WizardStep::ModeSelection { selected_index } => {
                     match key {
-                        KeyCode::Up => if *selected_index > 0 { *selected_index -= 1 } else { *selected_index = 2 },
-                        KeyCode::Down => *selected_index = (*selected_index + 1) % 3,
+                        KeyCode::Up => if *selected_index > 0 { *selected_index -= 1 } else { *selected_index = 3 },
+                        KeyCode::Down => *selected_index = (*selected_index + 1) % 4,
                         KeyCode::Enter => {
                             if *selected_index == 0 {
                                 next_step = Some(WizardStep::QuickRunInput {
@@ -562,23 +651,38 @@ CMD ["app"]
                                     memory: String::new(),
                                     focused_field: 0,
                                     editing_id: None,
+                                    port_status: PortStatus::None,
                                 });
+                            } else if *selected_index == 3 {
+                                let mut state = ListState::default();
+                                state.select(Some(0));
+                                next_step = Some(WizardStep::Janitor {
+                                    items: Vec::new(),
+                                    list_state: state,
+                                    loading: true,
+                                });
+                                wizard_action = Some(WizardAction::ScanJanitor);
                             } else {
                                 let current_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                                 let entries = Self::load_directory_entries(&current_path);
-                                let mode = if *selected_index == 1 { FileBrowserMode::Build } else { FileBrowserMode::Compose };
+                                let mut state = ListState::default();
+                                state.select(Some(0));
+                                
                                 next_step = Some(WizardStep::FileBrowser {
                                     current_path,
-                                    selected_file_index: 0,
+                                    list_state: state,
                                     entries,
-                                    mode,
+                                    mode: if *selected_index == 1 { FileBrowserMode::Build } else { FileBrowserMode::Compose },
                                 });
                             }
+                        }
+                        KeyCode::Esc => {
+                            // Do nothing or go back
                         }
                         _ => {}
                     }
                 }
-                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id } => {
+                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id, port_status } => {
                     match key {
                         KeyCode::Down | KeyCode::Tab => {
                             *focused_field = (*focused_field + 1) % 6;
@@ -601,6 +705,9 @@ CMD ["app"]
                                 _ => image,
                             };
                             target.push(c);
+                            if *focused_field == 2 {
+                                *port_status = Self::check_port(ports);
+                            }
                         }
                         KeyCode::Backspace => {
                             let target = match *focused_field {
@@ -613,6 +720,9 @@ CMD ["app"]
                                 _ => image,
                             };
                             target.pop();
+                            if *focused_field == 2 {
+                                *port_status = Self::check_port(ports);
+                            }
                         }
                         KeyCode::Enter => {
                             next_step = Some(WizardStep::Processing {
@@ -645,17 +755,21 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::FileBrowser { current_path, selected_file_index, entries, mode } => {
+                WizardStep::FileBrowser { current_path, list_state, entries, mode } => {
                     match key {
                         KeyCode::Up => {
-                            if *selected_file_index > 0 {
-                                *selected_file_index -= 1;
-                            }
+                            let i = match list_state.selected() {
+                                Some(i) => if i == 0 { 0 } else { i - 1 },
+                                None => 0,
+                            };
+                            list_state.select(Some(i));
                         }
                         KeyCode::Down => {
-                            if *selected_file_index + 1 < entries.len() {
-                                *selected_file_index += 1;
-                            }
+                            let i = match list_state.selected() {
+                                Some(i) => if i >= entries.len() - 1 { entries.len() - 1 } else { i + 1 },
+                                None => 0,
+                            };
+                            list_state.select(Some(i));
                         }
                         KeyCode::Char(' ') => {
                             if *mode == FileBrowserMode::Build {
@@ -668,6 +782,7 @@ CMD ["app"]
                                     port: framework.default_port().to_string(),
                                     editing_port: false,
                                     focused_option: 0,
+                                    port_status: PortStatus::None,
                                 });
                             } else if *mode == FileBrowserMode::Compose {
                                 let has_compose = current_path.join("docker-compose.yml").exists() || current_path.join("docker-compose.yaml").exists();
@@ -694,31 +809,33 @@ CMD ["app"]
                         }
                         KeyCode::Enter => {
                             if !entries.is_empty() {
-                                let selected_path = &entries[*selected_file_index];
-                                if selected_path.is_dir() {
-                                    *current_path = selected_path.clone();
-                                    *entries = Self::load_directory_entries(current_path);
-                                    *selected_file_index = 0;
-                                } else {
-                                    // File selected
-                                    if let Some(name) = selected_path.file_name() {
-                                        let name_str = name.to_string_lossy();
-                                        if *mode == FileBrowserMode::Build && name_str == "Dockerfile" {
-                                            next_step = Some(WizardStep::BuildConf {
-                                                tag: "my-app:latest".to_string(),
-                                                mount_volume: false,
-                                                focused_field: 0,
-                                                path: current_path.clone(),
-                                            });
-                                        } else if *mode == FileBrowserMode::Compose && (name_str == "docker-compose.yml" || name_str == "docker-compose.yaml") {
-                                             next_step = Some(WizardStep::Processing {
-                                                message: "Running Docker Compose...".to_string(),
-                                                spinner_frame: 0,
-                                            });
-                                            action_msg = Some("Running docker compose up".to_string());
-                                            wizard_action = Some(WizardAction::ComposeUp {
-                                                path: current_path.clone(),
-                                            });
+                                if let Some(selected_index) = list_state.selected() {
+                                    let selected_path = &entries[selected_index];
+                                    if selected_path.is_dir() {
+                                        *current_path = selected_path.clone();
+                                        *entries = Self::load_directory_entries(current_path);
+                                        list_state.select(Some(0));
+                                    } else {
+                                        // File selected
+                                        if let Some(name) = selected_path.file_name() {
+                                            let name_str = name.to_string_lossy();
+                                            if *mode == FileBrowserMode::Build && name_str == "Dockerfile" {
+                                                next_step = Some(WizardStep::BuildConf {
+                                                    tag: "my-app:latest".to_string(),
+                                                    mount_volume: false,
+                                                    focused_field: 0,
+                                                    path: current_path.clone(),
+                                                });
+                                            } else if *mode == FileBrowserMode::Compose && (name_str == "docker-compose.yml" || name_str == "docker-compose.yaml") {
+                                                 next_step = Some(WizardStep::Processing {
+                                                    message: "Running Docker Compose...".to_string(),
+                                                    spinner_frame: 0,
+                                                });
+                                                action_msg = Some("Running docker compose up".to_string());
+                                                wizard_action = Some(WizardAction::ComposeUp {
+                                                    path: current_path.clone(),
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -728,13 +845,13 @@ CMD ["app"]
                             if let Some(parent) = current_path.parent() {
                                 *current_path = parent.to_path_buf();
                                 *entries = Self::load_directory_entries(current_path);
-                                *selected_file_index = 0;
+                                list_state.select(Some(0));
                             }
                         }
                         _ => {}
                     }
                 }
-                WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option } => {
+                WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
                      if *manual_selection_open {
                          match key {
                              KeyCode::Up => if *manual_selected_index > 0 { *manual_selected_index -= 1 },
@@ -749,9 +866,15 @@ CMD ["app"]
                              _ => {}
                          }
                      } else if *editing_port {
-                         match key {
-                             KeyCode::Char(c) => port.push(c),
-                             KeyCode::Backspace => { port.pop(); },
+                          match key {
+                              KeyCode::Char(c) => {
+                                  port.push(c);
+                                  *port_status = Self::check_port(port);
+                              },
+                              KeyCode::Backspace => { 
+                                  port.pop(); 
+                                  *port_status = Self::check_port(port);
+                              },
                              KeyCode::Enter | KeyCode::Esc => *editing_port = false,
                              _ => {}
                          }
@@ -822,6 +945,45 @@ CMD ["app"]
                          }
                      }
                 }
+                WizardStep::Janitor { items, list_state, loading } => {
+                    if !*loading {
+                        match key {
+                            KeyCode::Up => {
+                                let i = match list_state.selected() {
+                                    Some(i) => if i == 0 { 0 } else { i - 1 },
+                                    None => 0,
+                                };
+                                list_state.select(Some(i));
+                            }
+                            KeyCode::Down => {
+                                let i = match list_state.selected() {
+                                    Some(i) => if i >= items.len() - 1 { items.len() - 1 } else { i + 1 },
+                                    None => 0,
+                                };
+                                list_state.select(Some(i));
+                            }
+                            KeyCode::Char(' ') => {
+                                if let Some(i) = list_state.selected() {
+                                    if let Some(item) = items.get_mut(i) {
+                                        item.selected = !item.selected;
+                                    }
+                                }
+                            },
+                            KeyCode::Enter => {
+                                let to_clean: Vec<JanitorItem> = items.iter().filter(|i| i.selected).cloned().collect();
+                                if !to_clean.is_empty() {
+                                    next_step = Some(WizardStep::Processing {
+                                        message: "Cleaning up...".to_string(),
+                                        spinner_frame: 0,
+                                    });
+                                    action_msg = Some("Running Janitor cleanup...".to_string());
+                                    wizard_action = Some(WizardAction::CleanJanitor(to_clean));
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
                 WizardStep::ComposeGenerator { path } => {
                     match key {
                         KeyCode::Char('g') | KeyCode::Enter => {
@@ -832,9 +994,11 @@ CMD ["app"]
                             });
                         }
                         KeyCode::Char('c') | KeyCode::Esc => {
+                             let mut state = ListState::default();
+                             state.select(Some(0));
                              next_step = Some(WizardStep::FileBrowser {
                                 current_path: path.clone(),
-                                selected_file_index: 0,
+                                list_state: state,
                                 entries: Self::load_directory_entries(path),
                                 mode: FileBrowserMode::Compose,
                             });
