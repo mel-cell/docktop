@@ -1,141 +1,293 @@
 use serde::{Deserialize, Serialize};
 use ratatui::style::Color;
 use std::fs;
-use std::collections::HashMap;
+use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
-    #[serde(default = "default_theme_name")]
-    pub theme: String,
-    #[serde(default = "default_show_braille")]
-    pub show_braille: bool,
-    #[serde(default = "default_refresh_rate")]
-    pub refresh_rate_ms: u64,
-    #[serde(default = "default_socket")]
-    pub default_socket: String,
-    #[serde(default = "default_confirm_delete")]
-    pub confirm_before_delete: bool,
+    #[serde(default)]
+    pub general: GeneralConfig,
+    #[serde(default)]
+    pub docker: DockerConfig,
     
     #[serde(skip)]
     pub theme_data: Theme,
+    
+    #[serde(skip)]
+    pub config_path: Option<String>,
 }
 
-fn default_theme_name() -> String { "monochrome".to_string() }
-fn default_show_braille() -> bool { true }
-fn default_refresh_rate() -> u64 { 1000 }
-fn default_socket() -> String { "unix:///var/run/docker.sock".to_string() }
-fn default_confirm_delete() -> bool { true }
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct GeneralConfig {
+    pub theme: String,
+    pub refresh_rate_ms: u64,
+    pub mouse_support: bool,
+    pub show_braille: bool,
+    pub confirm_on_delete: bool,
+    pub confirm_on_restart: bool,
+    pub log_tail_lines: usize,
+    pub default_sort: String,
+    pub show_all_containers: bool,
+    pub docker_cli_path: String,
+    pub graphs_history_size: usize,
+    pub enable_notifications: bool,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            theme: "monochrome".to_string(),
+            refresh_rate_ms: 1000,
+            mouse_support: true,
+            show_braille: true,
+            confirm_on_delete: true,
+            confirm_on_restart: false,
+            log_tail_lines: 100,
+            default_sort: "status".to_string(),
+            show_all_containers: true,
+            docker_cli_path: "/usr/bin/docker".to_string(),
+            graphs_history_size: 60,
+            enable_notifications: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DockerConfig {
+    pub socket_path: String,
+}
+
+impl Default for DockerConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: "unix:///var/run/docker.sock".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ThemeDefinition {
+    pub name: String,
+    pub background: String,
+    pub foreground: String,
+    pub border: String,
+    pub running: String,
+    pub stopped: String,
+    pub restarting: String,
+    pub selection_bg: String,
+    pub selection_fg: String,
+    pub header_fg: String,
+    pub cpu_low: String,
+    pub cpu_mid: String,
+    pub cpu_high: String,
+    pub memory_chart: String,
+    pub network_rx: String,
+    pub network_tx: String,
+}
+
+impl Default for ThemeDefinition {
+    fn default() -> Self {
+        Self {
+            name: "Dracula (Default)".to_string(),
+            background: "#282a36".to_string(),
+            foreground: "#f8f8f2".to_string(),
+            border: "#6272a4".to_string(),
+            running: "#50fa7b".to_string(),
+            stopped: "#ff5555".to_string(),
+            restarting: "#ffb86c".to_string(),
+            selection_bg: "#bd93f9".to_string(),
+            selection_fg: "#282a36".to_string(),
+            header_fg: "#8be9fd".to_string(),
+            cpu_low: "#50fa7b".to_string(),
+            cpu_mid: "#ffb86c".to_string(),
+            cpu_high: "#ff5555".to_string(),
+            memory_chart: "#bd93f9".to_string(),
+            network_rx: "#8be9fd".to_string(),
+            network_tx: "#ff79c6".to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Theme {
-    pub main_bg: Color,
-    pub main_fg: Color,
-    pub title: Color,
-    pub hi_fg: Color,
-    pub selected_bg: Color,
-    pub selected_fg: Color,
-    pub inactive_fg: Color,
-    pub graph_text: Color,
+    pub background: Color,
+    pub foreground: Color,
     pub border: Color,
-    pub graph_color: Color,
-    pub fish_color: Color,
+    pub running: Color,
+    pub stopped: Color,
+    pub restarting: Color,
+    pub selection_bg: Color,
+    pub selection_fg: Color,
+    pub header_fg: Color,
+    pub cpu_low: Color,
+    pub cpu_mid: Color,
+    pub cpu_high: Color,
+    pub memory_chart: Color,
+    pub network_rx: Color,
+    pub network_tx: Color,
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Theme {
-            main_bg: Color::Reset,
-            main_fg: Color::White,
-            title: Color::White,
-            hi_fg: Color::White,
-            selected_bg: Color::DarkGray,
-            selected_fg: Color::White,
-            inactive_fg: Color::Gray,
-            graph_text: Color::Gray,
-            border: Color::DarkGray,
-            graph_color: Color::Green,
-            fish_color: Color::Cyan,
+        Self::from_definition(&ThemeDefinition::default())
+    }
+}
+
+impl Theme {
+    pub fn from_definition(def: &ThemeDefinition) -> Self {
+        Self {
+            background: parse_hex_color(&def.background),
+            foreground: parse_hex_color(&def.foreground),
+            border: parse_hex_color(&def.border),
+            running: parse_hex_color(&def.running),
+            stopped: parse_hex_color(&def.stopped),
+            restarting: parse_hex_color(&def.restarting),
+            selection_bg: parse_hex_color(&def.selection_bg),
+            selection_fg: parse_hex_color(&def.selection_fg),
+            header_fg: parse_hex_color(&def.header_fg),
+            cpu_low: parse_hex_color(&def.cpu_low),
+            cpu_mid: parse_hex_color(&def.cpu_mid),
+            cpu_high: parse_hex_color(&def.cpu_high),
+            memory_chart: parse_hex_color(&def.memory_chart),
+            network_rx: parse_hex_color(&def.network_rx),
+            network_tx: parse_hex_color(&def.network_tx),
         }
     }
 }
 
 impl Config {
     pub fn load() -> Self {
-        let content = fs::read_to_string("config.toml").unwrap_or_default();
-        let mut config: Config = toml::from_str(&content).unwrap_or_else(|_| Config {
-            theme: default_theme_name(),
-            show_braille: default_show_braille(),
-            refresh_rate_ms: default_refresh_rate(),
-            default_socket: default_socket(),
-            confirm_before_delete: default_confirm_delete(),
-            theme_data: Theme::default(),
-        });
+        let mut content = String::new();
+        let mut path = None;
 
-        config.theme_data = load_theme(&config.theme);
+        if let Ok(home) = std::env::var("HOME") {
+            let config_path = Path::new(&home).join(".config/docktop/config.toml");
+            if config_path.exists() {
+                if let Ok(c) = fs::read_to_string(&config_path) {
+                    content = c;
+                    path = Some(config_path.to_string_lossy().to_string());
+                }
+            }
+        }
+        
+        if content.is_empty() {
+             if let Ok(c) = fs::read_to_string("config.toml") {
+                 content = c;
+                 path = Some("config.toml".to_string());
+             }
+        }
+
+        let mut config: Config = toml::from_str(&content).unwrap_or_else(|_| Config {
+            general: GeneralConfig::default(),
+            docker: DockerConfig::default(),
+            theme_data: Theme::default(),
+            config_path: None,
+        });
+        
+        config.config_path = path;
+        config.theme_data = load_theme(&config.general.theme);
         config
     }
 
     pub fn save(&self) {
+        let path = self.config_path.as_deref().unwrap_or("config.toml");
         if let Ok(content) = toml::to_string_pretty(self) {
-            let _ = fs::write("config.toml", content);
+            let _ = fs::write(path, content);
         }
     }
 }
 
-pub fn load_theme(theme_name: &str) -> Theme {
-    let path = format!("themes/{}.theme", theme_name);
-    let content = fs::read_to_string(&path).unwrap_or_default();
-    parse_theme(&content)
+pub fn parse_hex_color(hex: &str) -> Color {
+    if hex.len() == 7 && hex.starts_with('#') {
+        let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(0);
+        let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(0);
+        let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(0);
+        Color::Rgb(r, g, b)
+    } else {
+        Color::White
+    }
 }
 
-fn parse_theme(content: &str) -> Theme {
-    let mut map = HashMap::new();
-    
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with("theme[") && line.contains("]=") {
-            let parts: Vec<&str> = line.split("]=").collect();
-            if parts.len() == 2 {
-                let key = parts[0].trim_start_matches("theme[").trim();
-                let value = parts[1].trim_matches('"').trim();
-                map.insert(key.to_string(), value.to_string());
+pub fn load_theme(name: &str) -> Theme {
+    if let Ok(home) = std::env::var("HOME") {
+        let path = Path::new(&home).join(format!(".config/docktop/themes/{}.toml", name));
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(path) {
+                if let Ok(def) = toml::from_str::<ThemeDefinition>(&content) {
+                    return Theme::from_definition(&def);
+                }
             }
         }
     }
 
-    Theme {
-        main_bg: parse_color_str(map.get("main_bg").map(|s| s.as_str()).unwrap_or("")),
-        main_fg: parse_color_str(map.get("main_fg").map(|s| s.as_str()).unwrap_or("#FFFFFF")),
-        title: parse_color_str(map.get("title").map(|s| s.as_str()).unwrap_or("#EEEEEE")),
-        hi_fg: parse_color_str(map.get("hi_fg").map(|s| s.as_str()).unwrap_or("#FFFFFF")),
-        selected_bg: parse_color_str(map.get("selected_bg").map(|s| s.as_str()).unwrap_or("#404040")),
-        selected_fg: parse_color_str(map.get("selected_fg").map(|s| s.as_str()).unwrap_or("#FFFFFF")),
-        inactive_fg: parse_color_str(map.get("inactive_fg").map(|s| s.as_str()).unwrap_or("#666666")),
-        graph_text: parse_color_str(map.get("graph_text").map(|s| s.as_str()).unwrap_or("#888888")),
-        border: parse_color_str(map.get("div_line").map(|s| s.as_str()).unwrap_or("#444444")),
-        graph_color: parse_color_str(map.get("cpu_mid").map(|s| s.as_str()).unwrap_or("#888888")),
-        fish_color: parse_color_str(map.get("proc_misc").map(|s| s.as_str()).unwrap_or("#00FFFF")),
-    }
-}
-
-pub fn parse_color_str(color: &str) -> Color {
-    if color.is_empty() {
-        return Color::Reset;
-    }
-    if color.starts_with('#') {
-        let hex = color.trim_start_matches('#');
-        if hex.len() == 6 {
-            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
-            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
-            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
-            return Color::Rgb(r, g, b);
-        } else if hex.len() == 2 {
-             // Handle short hex like #BW (Black/White) - approximation
-             // For now just fallback to white if unknown
-             return Color::White;
+    let local_path = format!("themes/{}.toml", name);
+    if Path::new(&local_path).exists() {
+        if let Ok(content) = fs::read_to_string(local_path) {
+             if let Ok(def) = toml::from_str::<ThemeDefinition>(&content) {
+                 return Theme::from_definition(&def);
+             }
         }
     }
-    // Fallback for named colors if needed, though btop uses hex
-    Color::White
+
+    Theme::from_definition(&get_preset_theme_def(name))
+}
+
+pub fn get_preset_theme_def(name: &str) -> ThemeDefinition {
+    match name.to_lowercase().as_str() {
+        "monochrome" => ThemeDefinition {
+            name: "Monochrome".to_string(),
+            background: "#000000".to_string(),
+            foreground: "#ffffff".to_string(),
+            border: "#808080".to_string(),
+            running: "#ffffff".to_string(),
+            stopped: "#555555".to_string(),
+            restarting: "#aaaaaa".to_string(),
+            selection_bg: "#ffffff".to_string(),
+            selection_fg: "#000000".to_string(),
+            header_fg: "#ffffff".to_string(),
+            cpu_low: "#555555".to_string(),
+            cpu_mid: "#aaaaaa".to_string(),
+            cpu_high: "#ffffff".to_string(),
+            memory_chart: "#aaaaaa".to_string(),
+            network_rx: "#ffffff".to_string(),
+            network_tx: "#aaaaaa".to_string(),
+        },
+        "gruvbox" | "gruvbox dark" => ThemeDefinition {
+            name: "Gruvbox Dark".to_string(),
+            background: "#282828".to_string(),
+            foreground: "#ebdbb2".to_string(),
+            border: "#928374".to_string(),
+            running: "#b8bb26".to_string(),
+            stopped: "#fb4934".to_string(),
+            restarting: "#fabd2f".to_string(),
+            selection_bg: "#d65d0e".to_string(),
+            selection_fg: "#282828".to_string(),
+            header_fg: "#83a598".to_string(),
+            cpu_low: "#b8bb26".to_string(),
+            cpu_mid: "#fabd2f".to_string(),
+            cpu_high: "#fb4934".to_string(),
+            memory_chart: "#d3869b".to_string(),
+            network_rx: "#83a598".to_string(),
+            network_tx: "#fe8019".to_string(),
+        },
+        "cyberpunk" | "cyberpunk neon" => ThemeDefinition {
+            name: "Cyberpunk Neon".to_string(),
+            background: "#000000".to_string(),
+            foreground: "#00ff00".to_string(),
+            border: "#ff00ff".to_string(),
+            running: "#00ff9f".to_string(),
+            stopped: "#ff0055".to_string(),
+            restarting: "#f6ff00".to_string(),
+            selection_bg: "#00ff9f".to_string(),
+            selection_fg: "#000000".to_string(),
+            header_fg: "#f6ff00".to_string(),
+            cpu_low: "#00ff9f".to_string(),
+            cpu_mid: "#00b8ff".to_string(),
+            cpu_high: "#ff0055".to_string(),
+            memory_chart: "#bd00ff".to_string(),
+            network_rx: "#00b8ff".to_string(),
+            network_tx: "#ff0055".to_string(),
+        },
+        _ => ThemeDefinition::default(),
+    }
 }

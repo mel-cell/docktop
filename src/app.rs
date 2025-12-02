@@ -286,6 +286,22 @@ impl App {
         }
     }
 
+    pub fn update_containers(&mut self, mut containers: Vec<crate::docker::Container>) {
+        // Filter
+        if !self.config.general.show_all_containers {
+            containers.retain(|c| c.state == "running");
+        }
+
+        // Sort
+        match self.config.general.default_sort.as_str() {
+            "name" => containers.sort_by(|a, b| a.names.first().unwrap_or(&String::new()).cmp(b.names.first().unwrap_or(&String::new()))),
+            "status" => containers.sort_by(|a, b| a.state.cmp(&b.state)),
+            _ => {}
+        }
+        
+        self.containers = containers;
+    }
+
     pub fn next(&mut self) {
         if !self.containers.is_empty() {
             self.selected_index = (self.selected_index + 1) % self.containers.len();
@@ -349,14 +365,15 @@ impl App {
         
         self.cpu_history.push((x, cpu_usage));
         
-        if self.cpu_history.len() > 100 {
+        let limit = self.config.general.graphs_history_size;
+        while self.cpu_history.len() > limit {
             self.cpu_history.remove(0);
         }
 
-        if x > 100.0 {
-            self.x_axis_bounds = [x - 100.0, x];
+        if x > limit as f64 {
+            self.x_axis_bounds = [x - limit as f64, x];
         } else {
-            self.x_axis_bounds = [0.0, 100.0];
+            self.x_axis_bounds = [0.0, limit as f64];
         }
     }
 
@@ -370,19 +387,16 @@ impl App {
         self.net_rx_history.push((x, rx));
         self.net_tx_history.push((x, tx));
 
-        if self.net_rx_history.len() > 100 {
+        let limit = self.config.general.graphs_history_size;
+        while self.net_rx_history.len() > limit {
             self.net_rx_history.remove(0);
             self.net_tx_history.remove(0);
         }
         
-
-            
-
-
-        if x > 100.0 {
-            self.net_axis_bounds = [x - 100.0, x];
+        if x > limit as f64 {
+            self.net_axis_bounds = [x - limit as f64, x];
         } else {
-            self.net_axis_bounds = [0.0, 100.0];
+            self.net_axis_bounds = [0.0, limit as f64];
         }
     }
 
@@ -1144,54 +1158,53 @@ CMD ["app"]
                     }
                 }
                 WizardStep::Settings { focused_field, temp_config } => {
-                    match key {
-                        KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 } else { *focused_field = 3 },
-                        KeyCode::Down => *focused_field = (*focused_field + 1) % 4,
-                        KeyCode::Left | KeyCode::Right => {
-                            if *focused_field == 0 {
-                                let themes = vec!["monochrome", "dracula", "matrix"];
-                                let current_idx = themes.iter().position(|&t| t == temp_config.theme).unwrap_or(0);
-                                let new_idx = if key == KeyCode::Right {
-                                    (current_idx + 1) % themes.len()
-                                } else {
-                                    if current_idx == 0 { themes.len() - 1 } else { current_idx - 1 }
-                                };
-                                temp_config.theme = themes[new_idx].to_string();
-                                self.config.theme_data = crate::config::load_theme(&temp_config.theme);
-                            } else if *focused_field == 2 {
-                                let rates = vec![500, 1000, 2000];
-                                let current_idx = rates.iter().position(|&r| r == temp_config.refresh_rate_ms).unwrap_or(1);
-                                let new_idx = if key == KeyCode::Right {
-                                    (current_idx + 1) % rates.len()
-                                } else {
-                                    if current_idx == 0 { rates.len() - 1 } else { current_idx - 1 }
-                                };
-                                temp_config.refresh_rate_ms = rates[new_idx];
-                            }
+                match key {
+                    KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 } else { *focused_field = 3 },
+                    KeyCode::Down => *focused_field = (*focused_field + 1) % 4,
+                    KeyCode::Left | KeyCode::Right => {
+                        if *focused_field == 0 {
+                            let themes = vec!["monochrome", "dracula", "gruvbox", "cyberpunk"];
+                            let current_idx = themes.iter().position(|&t| t == temp_config.general.theme).unwrap_or(0);
+                            let next_idx = if key == KeyCode::Right {
+                                (current_idx + 1) % themes.len()
+                            } else {
+                                if current_idx == 0 { themes.len() - 1 } else { current_idx - 1 }
+                            };
+                            temp_config.general.theme = themes[next_idx].to_string();
+                            temp_config.theme_data = crate::config::load_theme(&temp_config.general.theme);
+                            self.config.theme_data = temp_config.theme_data.clone();
+                        } else if *focused_field == 2 { // Refresh rate
+                             let rates = [250, 500, 1000, 2000, 5000];
+                             let current = temp_config.general.refresh_rate_ms;
+                             let idx = rates.iter().position(|&r| r == current).unwrap_or(2);
+                             let next_idx = if key == KeyCode::Right { (idx + 1) % rates.len() } else { if idx == 0 { rates.len() - 1 } else { idx - 1 } };
+                             temp_config.general.refresh_rate_ms = rates[next_idx];
                         }
-                        KeyCode::Enter | KeyCode::Char(' ') => {
-                             match *focused_field {
-                                 1 => temp_config.show_braille = !temp_config.show_braille,
-                                 3 => temp_config.confirm_before_delete = !temp_config.confirm_before_delete,
-                                 _ => {}
-                             }
-                        }
-                        KeyCode::Char('s') => {
-                            self.config = temp_config.clone();
-                            self.config.theme_data = crate::config::load_theme(&self.config.theme);
-                            self.config.save();
-                            wizard_action = Some(WizardAction::Close);
-                        }
-                        KeyCode::Char('r') => {
-                             *temp_config = Config::load();
-                        }
-                        KeyCode::Esc => {
-                            self.config = Config::load();
-                            wizard_action = Some(WizardAction::Close);
-                        }
-                        _ => {}
                     }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                         match *focused_field {
+                             1 => temp_config.general.show_braille = !temp_config.general.show_braille,
+                             3 => temp_config.general.confirm_on_delete = !temp_config.general.confirm_on_delete,
+                             _ => {}
+                         }
+                    }
+                    KeyCode::Char('s') => { // Save
+                        self.config = temp_config.clone();
+                        self.config.theme_data = crate::config::load_theme(&self.config.general.theme);
+                        self.config.save();
+                        wizard_action = Some(WizardAction::Close);
+                    }
+                    KeyCode::Char('r') => { // Reset
+                         *temp_config = Config::load();
+                         self.config.theme_data = temp_config.theme_data.clone();
+                    }
+                    KeyCode::Esc => { // Cancel
+                        self.config = Config::load(); // Revert any temporary theme changes
+                        wizard_action = Some(WizardAction::Close);
+                    }
+                    _ => {}
                 }
+            }
                 WizardStep::Janitor { items, list_state, loading } => {
                     if !*loading {
                         match key {

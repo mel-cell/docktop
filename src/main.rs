@@ -40,14 +40,14 @@ enum Action {
     RefreshContainers,
 }
 
-fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cli_path: &str) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     println!("Entering container shell for {}...", container_id);
     
     // Try bash first
-    let status = std::process::Command::new("docker")
+    let status = std::process::Command::new(cli_path)
         .arg("exec")
         .arg("-it")
         .arg(container_id)
@@ -57,7 +57,7 @@ fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBa
     // If bash fails, try sh
     if status.is_err() || !status.unwrap().success() {
         println!("Bash failed, trying sh...");
-        let _ = std::process::Command::new("docker")
+        let _ = std::process::Command::new(cli_path)
             .arg("exec")
             .arg("-it")
             .arg(container_id)
@@ -622,7 +622,7 @@ async fn main() -> Result<()> {
         let tick_rate = if is_idle {
             idle_tick_rate
         } else {
-            Duration::from_millis(app.config.refresh_rate_ms)
+            Duration::from_millis(app.config.general.refresh_rate_ms)
         };
         
         terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -766,10 +766,13 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Char('e') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        let _ = enter_container_shell(&c.id, &mut terminal);
-                                    }
-                                }
+                    if let Some(container) = app.get_selected_container() {
+                        let id = container.id.clone();
+                        let cli_path = app.config.general.docker_cli_path.clone();
+                        let _ = enter_container_shell(&id, &mut terminal, &cli_path);
+                        terminal.clear()?;
+                    }
+                }
                                 KeyCode::Char('b') => {
                                     if let Some(c) = app.get_selected_container() {
                                         if let Some(inspect) = &app.current_inspection {
@@ -870,7 +873,11 @@ async fn main() -> Result<()> {
         if last_tick.elapsed() >= tick_rate {
             // Update Containers
             while let Ok(containers) = rx_containers.try_recv() {
-                app.containers = containers;
+                app.update_containers(containers);
+                // If selection out of bounds, reset
+                if app.selected_index >= app.containers.len() && !app.containers.is_empty() {
+                    app.selected_index = app.containers.len() - 1;
+                }
                 if app.containers.len() > 0 && rx_target.borrow().is_none() {
                      if let Some(c) = app.get_selected_container() {
                         let _ = tx_target.send(Some(c.id.clone()));

@@ -69,3 +69,25 @@ fi
 
 echo "DockTop installed successfully!"
 echo "Run 'docktop' to start the application."
+
+# Install Config
+CONFIG_DIR="$HOME/.config/docktop"
+if [ ! -d "$CONFIG_DIR" ]; then
+    mkdir -p "$CONFIG_DIR"
+fi
+
+if [ ! -f "$CONFIG_DIR/config.toml" ]; then
+    echo "Installing default configuration to $CONFIG_DIR/config.toml..."
+    cp config.toml "$CONFIG_DIR/config.toml"
+else
+    echo "Configuration file already exists at $CONFIG_DIR/config.toml. Skipping..."
+fi
+
+# Install Themes
+THEMES_DIR="$CONFIG_DIR/themes"
+if [ ! -d "$THEMES_DIR" ]; then
+    mkdir -p "$THEMES_DIR"
+fi
+
+echo "Installing themes to $THEMES_DIR..."
+cp -r themes/* "$THEMES_DIR/"

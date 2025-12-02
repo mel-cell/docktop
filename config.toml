@@ -1,2 +1,27 @@
+# ~/.config/docktop/config.toml
+
+# --- 1. PENGATURAN UMUM (BEHAVIOR) ---
 [general]
-theme = "monochrome"
+theme = "monochrome"            # Nama file theme di folder themes/ (tanpa .toml)
+refresh_rate_ms = 1000       # Kecepatan update data (ms)
+mouse_support = true         # Aktifkan klik mouse
+confirm_on_delete = true     # Tanya dulu sebelum hapus container
+confirm_on_restart = false   # Langsung restart tanpa tanya
+log_tail_lines = 100         # Berapa baris log yang diambil
+default_sort = "status"      # name, status, cpu, memory
+show_all_containers = true   # Tampilkan semua container
+docker_cli_path = "/usr/bin/docker"
+graphs_history_size = 60
+enable_notifications = false
+show_braille = true
+
+# --- 2. PENGATURAN DOCKER (CONNECTION) ---
+[docker]
+# Kosongkan untuk auto-detect, atau isi manual jika pakai remote server
+# host = "ssh://user@192.168.1.5" 
+# host = "unix:///var/run/docker.sock"
+socket_path = "unix:///var/run/docker.sock"
+
+# --- 3. PENGATURAN TAMPILAN (THEME ENGINE) ---
+# Theme sekarang dimuat dari file eksternal di folder themes/
+# Contoh: themes/dracula.toml, themes/gruvbox.toml

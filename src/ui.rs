@@ -57,7 +57,7 @@ fn draw_monitor_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(" MONITOR ", Style::default().fg(theme.title).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(" MONITOR ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)));
     
     let inner_area = block.inner(area);
     f.render_widget(block, area);
@@ -81,7 +81,7 @@ fn draw_cpu_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(" CPU ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.inactive_fg));
+        .border_style(Style::default().fg(theme.border));
     
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -98,17 +98,17 @@ fn draw_cpu_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
         let last_val = app.cpu_history.last().map(|(_, v)| *v).unwrap_or(0.0);
         let color = if last_val < 50.0 {
-            Color::Green
+            theme.cpu_low
         } else if last_val < 80.0 {
-            Color::Yellow
+            theme.cpu_mid
         } else {
-            Color::Red
+            theme.cpu_high
         };
 
         let datasets = vec![
             Dataset::default()
                 .name(label)
-                .marker(symbols::Marker::Braille)
+                .marker(if app.config.general.show_braille { symbols::Marker::Braille } else { symbols::Marker::Dot })
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(color))
                 .data(&app.cpu_history),
@@ -116,8 +116,8 @@ fn draw_cpu_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
         let chart = Chart::new(datasets)
             .block(Block::default().borders(Borders::NONE))
-            .x_axis(Axis::default().style(Style::default().fg(theme.graph_text)).bounds(app.x_axis_bounds))
-            .y_axis(Axis::default().style(Style::default().fg(theme.graph_text)).bounds([0.0, 100.0]));
+            .x_axis(Axis::default().style(Style::default().fg(theme.foreground)).bounds(app.x_axis_bounds))
+            .y_axis(Axis::default().style(Style::default().fg(theme.foreground)).bounds([0.0, 100.0]));
         
         f.render_widget(chart, inner);
     }
@@ -127,7 +127,7 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(" MEM ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.inactive_fg));
+        .border_style(Style::default().fg(theme.border));
     
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -165,7 +165,7 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
         // RAM Usage Text
         let label = Paragraph::new(format!("RAM: {} / {}", fmt_bytes(mem_usage), fmt_bytes(mem_limit)))
-            .style(Style::default().fg(theme.main_fg));
+            .style(Style::default().fg(theme.foreground));
         f.render_widget(label, chunks[0]);
 
         // Stacked Bar
@@ -187,7 +187,7 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             let free_chars = (width as usize).saturating_sub(used_chars + cache_chars);
 
             let bar = Line::from(vec![
-                Span::styled(" ".repeat(used_chars), Style::default().bg(Color::Green)),
+                Span::styled(" ".repeat(used_chars), Style::default().bg(theme.memory_chart)),
                 Span::styled(" ".repeat(cache_chars), Style::default().bg(Color::Cyan)),
                 Span::styled(" ".repeat(free_chars), Style::default().bg(Color::DarkGray)),
             ]);
@@ -211,7 +211,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(" NET ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.inactive_fg));
+        .border_style(Style::default().fg(theme.border));
     
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -245,7 +245,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let sparkline_tx = Sparkline::default()
         .block(Block::default().title(format!("TX (Peak: {})", fmt_bytes(max_tx))).borders(Borders::NONE))
-        .style(Style::default().fg(Color::LightRed)) // Orange-ish
+        .style(Style::default().fg(theme.network_tx)) // Orange-ish
         .data(&tx_data);
     f.render_widget(sparkline_tx, chunks[1]);
 
@@ -298,7 +298,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
              
              for (_idx, c) in s.char_indices() {
                  if c == '<' || c == '>' {
-                     spans.push(Span::styled(c.to_string(), Style::default().fg(theme.fish_color)));
+                     spans.push(Span::styled(c.to_string(), Style::default().fg(theme.network_rx)));
                  } else if c == 'o' {
                      spans.push(Span::styled(c.to_string(), Style::default().fg(Color::White)));
                  } else {
@@ -310,7 +310,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }).collect();
     
     let aquarium = Paragraph::new(aquarium_text)
-        .block(Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme.inactive_fg)))
+        .block(Block::default().borders(Borders::LEFT).border_style(Style::default().fg(theme.border)))
         .alignment(ratatui::layout::Alignment::Left); // Left align to match our grid
         
     f.render_widget(aquarium, chunks[1]);
@@ -347,25 +347,27 @@ fn draw_container_section(f: &mut Frame, app: &mut App, area: Rect, theme: &Them
 fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let header_cells = ["State", "ID", "Name", "Image", "Status"]
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(theme.title).add_modifier(Modifier::BOLD)));
+        .map(|h| Cell::from(*h).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)));
     
     let header = Row::new(header_cells)
-        .style(Style::default().bg(theme.main_bg))
+        .style(Style::default().bg(theme.background))
         .height(1)
         .bottom_margin(1);
 
     let rows = app.containers.iter().map(|c| {
         let (icon, color) = if c.state == "running" {
-            ("●", theme.graph_color)
+            ("●", theme.running)
+        } else if c.state == "restarting" {
+            ("●", theme.restarting)
         } else {
-            ("○", theme.inactive_fg)
+            ("○", theme.stopped)
         };
         let cells = vec![
             Cell::from(Span::styled(icon, Style::default().fg(color))),
-            Cell::from(Span::styled(&c.id[..12], Style::default().fg(theme.main_fg))),
-            Cell::from(Span::styled(&c.names[0], Style::default().fg(theme.main_fg).add_modifier(Modifier::BOLD))),
-            Cell::from(Span::styled(&c.image, Style::default().fg(theme.main_fg))),
-            Cell::from(Span::styled(&c.status, Style::default().fg(theme.inactive_fg))),
+            Cell::from(Span::styled(&c.id[..12], Style::default().fg(theme.foreground))),
+            Cell::from(Span::styled(&c.names[0], Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled(&c.image, Style::default().fg(theme.foreground))),
+            Cell::from(Span::styled(&c.status, Style::default().fg(theme.border))),
         ];
         Row::new(cells).height(1)
     });
@@ -401,7 +403,7 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
             .title_bottom(actions_line)
             .border_style(Style::default().fg(Color::DarkGray))
         )
-        .highlight_style(Style::default().bg(theme.selected_bg).fg(theme.selected_fg).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
 
     let mut state = ratatui::widgets::TableState::default();
@@ -1039,24 +1041,24 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
 
              let style = |idx| if *focused_field == idx { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Gray) };
              
-             // Theme
-             let p = Paragraph::new(format!("< {} > (Left/Right)", temp_config.theme))
+             // Theme Selection
+             let p = Paragraph::new(format!("< {} > (Left/Right)", temp_config.general.theme))
                 .block(Block::default().borders(Borders::ALL).title("Theme").border_style(style(0)));
              f.render_widget(p, layout[0]);
 
              // Braille
-             let check = if temp_config.show_braille { "[x]" } else { "[ ]" };
+             let check = if temp_config.general.show_braille { "[x]" } else { "[ ]" };
              let p = Paragraph::new(format!("{} Enable Braille Graphs", check))
                 .block(Block::default().borders(Borders::ALL).title("Appearance").border_style(style(1)));
              f.render_widget(p, layout[1]);
 
              // Refresh Rate
-             let p = Paragraph::new(format!("< {} ms > (Left/Right)", temp_config.refresh_rate_ms))
-                .block(Block::default().borders(Borders::ALL).title("Refresh Interval").border_style(style(2)));
+             let p = Paragraph::new(format!("< {} ms > (Left/Right)", temp_config.general.refresh_rate_ms))
+                .block(Block::default().borders(Borders::ALL).title("Refresh Rate").border_style(style(2)));
              f.render_widget(p, layout[2]);
 
              // Confirm Delete
-             let check = if temp_config.confirm_before_delete { "[x]" } else { "[ ]" };
+             let check = if temp_config.general.confirm_on_delete { "[x]" } else { "[ ]" };
              let p = Paragraph::new(format!("{} Confirm on Delete", check))
                 .block(Block::default().borders(Borders::ALL).title("Safety").border_style(style(3)));
              f.render_widget(p, layout[3]);
