@@ -1,165 +1,3 @@
-<<<<<<< HEAD
-# Monorepo Development Environment
-
-This project provides a Docker-based development environment with multiple services including web servers, databases, and utilities.
-
-## Services Included
-
-- **Nginx**: Frontend proxy server.
-- **Apache + PHP 8.2**: Backend web server with PHP support.
-- **MySQL**: Relational database server.
-- **PostgreSQL**: Relational database server.
-- **pgAdmin**: Web-based GUI for managing PostgreSQL.
-- **FTP Server (vsftpd)**: FTP service for file transfers.
-- **DNS Server (dnsmasq)**: Local DNS for *.localhost domains.
-
-## Prerequisites
-
-- Linux operating system.
-- Docker and Docker Compose installed.
-- Basic knowledge of terminal commands.
-
-## Installation and Setup on Linux
-
-1. **Install Docker**
-
-   Follow the official Docker installation guide for your Linux distribution:
-
-   https://docs.docker.com/engine/install/
-
-2. **Install Docker Compose**
-
-   Docker Compose V2 is included with recent Docker versions. Verify installation:
-
-   ```bash
-   docker compose version
-   ```
-
-   If not installed, follow:
-
-   https://docs.docker.com/compose/install/
-
-3. **Clone this repository**
-
-   ```bash
-   git clone <repository-url>
-   cd monorepo-devenv
-   ```
-
-4. **Make the server script executable**
-
-   ```bash
-   chmod +x server
-   ```
-
-5. **Start the development environment**
-
-   Run the interactive server management script:
-
-   ```bash
-   ./server
-   ```
-
-   Use arrow keys to navigate the menu and Enter to select options.
-
-## Usage
-
-### Starting and Managing Services
-
-Use the provided `server` script to manage the environment interactively:
-
-```bash
-./server
-```
-
-This will launch a navigable menu where you can select options such as:
-
-- Start Services
-- Stop Services
-- Restart Services
-- View Logs
-- Enter Container
-- Check Status
-- MySQL Shell
-- Clean Up
-- Help
-- Exit
-
-Navigate using arrow keys and select with Enter.
-
-### Accessing Databases
-
-#### MySQL
-
-- **Port:** 3306
-- **Username:** root
-- **Password:** root
-- **Default Database:** mysqldb
-
-Access MySQL via CLI:
-
-```bash
-./server mysql
-```
-
-Or manually:
-
-```bash
-docker compose exec mysql mysql -u root -p
-```
-
-Access MySQL via phpMyAdmin (if running):
-
-- URL: `http://localhost:8080`
-- Username: `root`
-- Password: `root`
-
-#### PostgreSQL
-
-- **Port:** 5432
-- **Username:** root
-- **Password:** root
-- **Default Database:** postgresdb
-
-Access PostgreSQL via CLI:
-
-```bash
-docker compose exec postgresql psql -U root -d postgresdb
-```
-
-Or enter container:
-
-```bash
-./server enter postgresql
-psql -U root -d postgresdb
-```
-
-Access PostgreSQL via pgAdmin:
-
-- URL: `http://localhost:5050`
-- Email: `admin@admin.com`
-- Password: `root`
-
-Add a new server in pgAdmin with the following details:
-
-- Host: `postgresql`
-- Port: `5432`
-- Username: `root`
-- Password: `root`
-- Database: `postgresdb`
-
-## Cleaning Up
-
-To stop and remove containers, volumes, and orphan containers:
-
-```bash
-./server clean
-```
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE.md](LICENSE.md) file for details.
-=======
 # DockTop 🐳
 
 <div align="center">
@@ -176,7 +14,6 @@ This project is licensed under the MIT License. See the [LICENSE.md](LICENSE.md)
 
 ---
 
-
 DockTop is a modern, feature-rich terminal user interface for managing Docker containers. Built with Rust and Ratatui, it provides real-time monitoring, interactive wizards, and a beautiful interface inspired by btop.
 
 ### ✨ Key Features
@@ -190,6 +27,9 @@ DockTop is a modern, feature-rich terminal user interface for managing Docker co
   - Quick Pull & Run containers
   - Build from Dockerfile
   - Docker Compose generation
+- 🧹 **Janitor** - Clean up unused containers, images, and volumes
+- ⚙️ **Settings System** - Configure theme, refresh rate, and behavior directly in the app
+- ⚡ **Eco Mode** - Adaptive refresh rate to save CPU when idle
 - 📝 **Live Logs** - Real-time container log streaming
 - 🎯 **Resource Allocation** - Smart resource management for databases
 - 🎨 **Theme Support** - Load custom btop-style themes
@@ -208,7 +48,7 @@ DockTop is a modern, feature-rich terminal user interface for managing Docker co
 Clone the repository and run the installation script:
 
 ```bash
-git clone https://github.com/yourusername/docktop.git
+git clone https://github.com/mel-cell/docktop.git
 cd docktop
 chmod +x install.sh
 ./install.sh
@@ -251,7 +91,7 @@ docktop
 #### Navigation
 
 - `↑/↓` or `j/k` - Navigate containers
-- `Tab` - Switch between sections
+- `Tab` - Switch between sections / Open Tools Menu
 - `q` or `Ctrl+C` - Quit application
 
 #### Container Actions
@@ -262,16 +102,39 @@ docktop
 - `r` - Restart container
 - `d` - Remove container
 - `l` - View logs
+- `F5` - Force refresh container list
 
 #### Tools & Wizards
 
-- `?` - Open wizard menu
+- `?` or `Tab` - Open wizard menu
 - `Esc` - Cancel/Go back
 - `Enter` - Confirm selection
 
 ---
 
 ## ⚙️ Configuration
+
+### Settings UI
+
+You can configure DockTop directly within the application:
+
+1. Press `Tab` to open the Tools menu.
+2. Select **Settings**.
+3. Use `Up/Down` to navigate and `Left/Right` to change values.
+4. Press `S` to save or `Esc` to cancel.
+
+### Configuration File
+
+DockTop stores configuration in `config.toml` (in the current directory or `~/.config/docktop/config.toml`):
+
+```toml
+# DockTop Configuration
+theme = "monochrome"
+show_braille = true
+refresh_rate_ms = 1000
+confirm_before_delete = true
+default_socket = "unix:///var/run/docker.sock"
+```
 
 ### Theme Customization
 
@@ -280,7 +143,8 @@ DockTop supports btop-style themes. Create or modify theme files in the `themes/
 ```bash
 themes/
 ├── monochrome.theme
-├── default.theme
+├── dracula.theme
+├── matrix.theme
 └── custom.theme
 ```
 
@@ -290,54 +154,7 @@ themes/
 # Theme colors
 theme[main_bg]="#00"
 theme[main_fg]="#cc"
-theme[title]="#ee"
-theme[hi_fg]="#90"
-theme[selected_bg]="#7e2626"
-theme[selected_fg]="#ee"
-theme[inactive_fg]="#40"
-theme[proc_misc]="#0de6e6"
-theme[cpu_box]="#3d7b46"
-theme[mem_box]="#8a2be2"
-theme[net_box]="#e62020"
-theme[proc_box]="#3d7b46"
-theme[div_line]="#30"
-theme[temp_start]="#4897d4"
-theme[temp_mid]="#5474e8"
-theme[temp_end]="#ff40b6"
-theme[cpu_start]="#4897d4"
-theme[cpu_mid]="#5474e8"
-theme[cpu_end]="#ff40b6"
-theme[free_start]="#744daa"
-theme[free_mid]="#e65696"
-theme[free_end]="#ff40b6"
-theme[cached_start]="#00e6e6"
-theme[cached_mid]="#00e6e6"
-theme[cached_end]="#00e6e6"
-theme[available_start]="#00e6e6"
-theme[available_mid]="#00e6e6"
-theme[available_end]="#00e6e6"
-theme[used_start]="#00e6e6"
-theme[used_mid]="#00e6e6"
-theme[used_end]="#00e6e6"
-theme[download_start]="#00e6e6"
-theme[download_mid]="#00e6e6"
-theme[download_end]="#00e6e6"
-theme[upload_start]="#00e6e6"
-theme[upload_mid]="#00e6e6"
-theme[upload_end]="#00e6e6"
-theme[process_start]="#00e6e6"
-theme[process_mid]="#00e6e6"
-theme[process_end]="#00e6e6"
-```
-
-### Configuration File
-
-DockTop looks for configuration in `~/.config/docktop/config.toml`:
-
-```toml
-# DockTop Configuration
-theme = "monochrome"
-refresh_rate = 1000  # milliseconds
+# ... (standard btop theme format)
 ```
 
 ---
@@ -348,7 +165,7 @@ refresh_rate = 1000  # milliseconds
 
 Quickly pull and run containers from Docker Hub:
 
-1. Press `?` to open the wizard menu
+1. Press `Tab` to open the wizard menu
 2. Select "Quick Pull & Run"
 3. Enter image name (e.g., `nginx:latest`)
 4. Configure ports, environment variables, and resources
@@ -358,7 +175,7 @@ Quickly pull and run containers from Docker Hub:
 
 Build and run from local Dockerfile:
 
-1. Press `?` to open the wizard menu
+1. Press `Tab` to open the wizard menu
 2. Select "Build from Source"
 3. Browse to your project directory
 4. DockTop will auto-detect the framework (Node.js, Python, Go, etc.)
@@ -368,11 +185,20 @@ Build and run from local Dockerfile:
 
 Generate production-ready docker-compose.yml files:
 
-1. Press `?` to open the wizard menu
+1. Press `Tab` to open the wizard menu
 2. Select "Docker Compose"
 3. Choose your services (databases, caches, etc.)
 4. DockTop automatically calculates optimal resource allocation
 5. Review and save the generated compose file
+
+### Janitor
+
+Clean up unused resources:
+
+1. Press `Tab` to open the wizard menu
+2. Select "Janitor"
+3. Scan for dangling images, stopped containers, and unused volumes
+4. Select items to clean and confirm
 
 ---
 
@@ -493,4 +319,3 @@ For questions, suggestions, or issues, please open an issue on GitHub.
 **Made with ❤️ and 🦀 Rust**
 
 </div>
->>>>>>> V2
