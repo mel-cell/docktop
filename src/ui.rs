@@ -1,14 +1,15 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Alignment},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Paragraph, Wrap, Gauge, Table, Row, Cell, Chart, Dataset, Axis, GraphType, List, ListItem, Clear},
+    widgets::{Block, Borders, BorderType, Paragraph, Wrap, Table, Row, Cell, Chart, Dataset, Axis, GraphType, List, ListItem, Clear, Sparkline, block::{Title, Position}},
     symbols,
     Frame,
 };
 use crate::app::App;
 use crate::docker::ContainerStats;
 use crate::config::Theme;
+use crate::theme::icons::IconSet;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let theme = app.config.theme_data.clone();
@@ -31,6 +32,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_container_section(f, app, chunks[2], theme);
     draw_logs_section(f, app, chunks[3], theme);
     draw_footer(f, app, chunks[4], theme);
+
+    if app.show_details {
+        draw_details_popup(f, app, f.size(), theme);
+    }
 }
 
 fn draw_title_bar(f: &mut Frame, _app: &App, area: Rect) {
@@ -91,12 +96,21 @@ fn draw_cpu_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             format!("Usage: {:.1}%", cpu)
         };
 
+        let last_val = app.cpu_history.last().map(|(_, v)| *v).unwrap_or(0.0);
+        let color = if last_val < 50.0 {
+            Color::Green
+        } else if last_val < 80.0 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
         let datasets = vec![
             Dataset::default()
                 .name(label)
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(theme.graph_color))
+                .style(Style::default().fg(color))
                 .data(&app.cpu_history),
         ];
 
@@ -121,14 +135,10 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if let Some(stats) = &app.current_stats {
         let mem_usage = stats.memory_stats.usage.unwrap_or(0) as f64;
         let mem_limit = stats.memory_stats.limit.unwrap_or(0) as f64;
-        let mem_percent = if mem_limit > 0.0 { (mem_usage / mem_limit) * 100.0 } else { 0.0 };
         
         // Extract Cache and Swap
         let (cache, swap) = if let Some(details) = &stats.memory_stats.stats {
             let c = *details.get("cache").or(details.get("total_cache")).unwrap_or(&0) as f64;
-            // Swap is usually 'swap' or 'total_swap' in stats, but sometimes it's not directly exposed as usage
-            // Docker stats often calculates swap as (mem+swap usage) - mem usage?
-            // Let's check for 'swap' key directly first
             let s = *details.get("swap").unwrap_or(&0) as f64;
             (c, s)
         } else {
@@ -148,35 +158,52 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // Main Usage
-                Constraint::Length(1), // Gauge
-                Constraint::Length(1), // Cache
-                Constraint::Length(1), // Swap
+                Constraint::Length(1), // Stacked Bar
+                Constraint::Length(1), // Legend/Details
             ])
             .split(inner);
 
-        // RAM Usage
+        // RAM Usage Text
         let label = Paragraph::new(format!("RAM: {} / {}", fmt_bytes(mem_usage), fmt_bytes(mem_limit)))
             .style(Style::default().fg(theme.main_fg));
         f.render_widget(label, chunks[0]);
 
-        let gauge = Gauge::default()
-            .gauge_style(Style::default().fg(theme.graph_color).bg(theme.selected_bg))
-            .ratio(mem_percent / 100.0)
-            .label(format!("{:.1}%", mem_percent));
-        f.render_widget(gauge, chunks[1]);
+        // Stacked Bar
+        if mem_limit > 0.0 {
+            let width = chunks[1].width as f64;
+            // Real used (without cache) usually? Docker stats usage includes cache sometimes depending on version.
+            // But here we treat 'mem_usage' as total used reported by docker.
+            // If we want to separate cache, we should subtract it if usage includes it.
+            // For simplicity, let's assume mem_usage includes cache.
+            let real_used = (mem_usage - cache).max(0.0);
+            
+            let used_ratio = real_used / mem_limit;
+            let cache_ratio = cache / mem_limit;
+            // Ensure they don't exceed 1.0
+            let _total_ratio = (used_ratio + cache_ratio).min(1.0);
 
-        // Cache
-        if cache > 0.0 {
-             let cache_label = Paragraph::new(format!("Cache: {}", fmt_bytes(cache)))
-                .style(Style::default().fg(theme.inactive_fg));
-             f.render_widget(cache_label, chunks[2]);
+            let used_chars = (used_ratio * width).round() as usize;
+            let cache_chars = (cache_ratio * width).round() as usize;
+            let free_chars = (width as usize).saturating_sub(used_chars + cache_chars);
+
+            let bar = Line::from(vec![
+                Span::styled(" ".repeat(used_chars), Style::default().bg(Color::Green)),
+                Span::styled(" ".repeat(cache_chars), Style::default().bg(Color::Cyan)),
+                Span::styled(" ".repeat(free_chars), Style::default().bg(Color::DarkGray)),
+            ]);
+            f.render_widget(Paragraph::new(bar), chunks[1]);
         }
 
-        // Swap
-        // Note: If swap is 0, it might mean disabled or not used.
-        let swap_label = Paragraph::new(format!("Swap: {}", fmt_bytes(swap)))
-            .style(Style::default().fg(theme.inactive_fg));
-        f.render_widget(swap_label, chunks[3]);
+        // Legend
+        let legend = Line::from(vec![
+            Span::styled(" Used ", Style::default().fg(Color::Green)),
+            Span::styled(format!("({}) ", fmt_bytes(mem_usage - cache)), Style::default().fg(Color::Gray)),
+            Span::styled(" Cache ", Style::default().fg(Color::Cyan)),
+            Span::styled(format!("({}) ", fmt_bytes(cache)), Style::default().fg(Color::Gray)),
+            Span::styled(" Swap ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("({})", fmt_bytes(swap)), Style::default().fg(Color::Gray)),
+        ]);
+        f.render_widget(Paragraph::new(legend), chunks[2]);
     }
 }
 
@@ -190,37 +217,37 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     f.render_widget(block, area);
 
     let chunks = Layout::default()
-        .direction(Direction::Horizontal)
+        .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
-    // Graph
-    let datasets = vec![
-        Dataset::default()
-            .name("RX")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Green))
-            .data(&app.net_rx_history),
-        Dataset::default()
-            .name("TX")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(Color::Red))
-            .data(&app.net_tx_history),
-    ];
+    let rx_data: Vec<u64> = app.net_rx_history.iter().map(|(_, v)| *v as u64).collect();
+    let tx_data: Vec<u64> = app.net_tx_history.iter().map(|(_, v)| *v as u64).collect();
 
-    let max_val = app.net_rx_history.iter().chain(app.net_tx_history.iter())
-        .map(|(_, v)| *v)
-        .fold(0.0, f64::max);
-    let y_max = if max_val > 100.0 { max_val * 1.1 } else { 100.0 };
+    let max_rx = rx_data.iter().max().copied().unwrap_or(0);
+    let max_tx = tx_data.iter().max().copied().unwrap_or(0);
 
-    let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::NONE))
-        .x_axis(Axis::default().style(Style::default().fg(theme.graph_text)).bounds(app.net_axis_bounds))
-        .y_axis(Axis::default().style(Style::default().fg(theme.graph_text)).bounds([0.0, y_max]));
-    
-    f.render_widget(chart, chunks[0]);
+    // Helper to format bytes
+    let fmt_bytes = |b: u64| -> String {
+        let b = b as f64;
+        if b > 1024.0 * 1024.0 {
+            format!("{:.1} MB/s", b / 1024.0 / 1024.0)
+        } else {
+            format!("{:.1} KB/s", b / 1024.0)
+        }
+    };
+
+    let sparkline_rx = Sparkline::default()
+        .block(Block::default().title(format!("RX (Peak: {})", fmt_bytes(max_rx))).borders(Borders::NONE))
+        .style(Style::default().fg(Color::Blue))
+        .data(&rx_data);
+    f.render_widget(sparkline_rx, chunks[0]);
+
+    let sparkline_tx = Sparkline::default()
+        .block(Block::default().title(format!("TX (Peak: {})", fmt_bytes(max_tx))).borders(Borders::NONE))
+        .style(Style::default().fg(Color::LightRed)) // Orange-ish
+        .data(&tx_data);
+    f.render_widget(sparkline_tx, chunks[1]);
 
     // Aquarium Animation
     let width = 30; // Approximate width of the aquarium area in chars
@@ -355,12 +382,15 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
         Span::styled(" MANAGEMENT: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::styled("[C] Create ", Style::default().fg(Color::Gray)),
         Span::styled("[E] Edit ", Style::default().fg(Color::Gray)),
+        Span::styled("[e] Shell ", Style::default().fg(Color::Gray)),
         Span::styled("[B] Rebuild ", Style::default().fg(Color::Gray)),
         Span::styled(" | ", Style::default().fg(Color::DarkGray)),
         Span::styled("ACTIONS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::styled("[R] Restart ", Style::default().fg(Color::Gray)),
         Span::styled("[S] Stop ", Style::default().fg(Color::Gray)),
         Span::styled("[U] Start ", Style::default().fg(Color::Gray)),
+        Span::styled("[Del] Delete ", Style::default().fg(Color::Gray)),
+        Span::styled("[Enter] Details ", Style::default().fg(Color::Gray)),
     ]);
 
     let table = Table::new(rows, widths)
@@ -399,7 +429,8 @@ fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" TOOLS ");
+        .title(" TOOLS ")
+        .title(Title::from(" [Tab] Tools ").alignment(Alignment::Right).position(Position::Bottom));
     
     f.render_widget(block.clone(), area);
 
@@ -438,6 +469,7 @@ fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         let p = Paragraph::new(globe.join("\n"))
             .style(Style::default().fg(Color::White));
         f.render_widget(p, h_layout[1]);
+
     }
 }
 
@@ -462,7 +494,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let options = [
                 (">_ Quick Pull & Run", "Pull from registry and run immediately"),
                 ("./ Build from Source", "Build Dockerfile from local directory"),
-                ("{} Docker Compose", "Run docker-compose.yml project")
+                ("{} Docker Compose", "Run docker-compose.yml project"),
+                (" Janitor", "Clean up unused resources"),
+                ("⚙ Settings", "Configure application"),
             ];
             
             let items: Vec<ListItem> = options
@@ -544,29 +578,76 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let help = Paragraph::new("ENTER: Create/Update | TAB: Next Field").style(Style::default().fg(Color::DarkGray));
             f.render_widget(help, chunks[7]);
         },
-        crate::app::WizardStep::FileBrowser { current_path, list_state, entries, mode } => {
+        crate::app::WizardStep::FileBrowser { current_path, list_state, items, mode } => {
              let title = match mode {
                  crate::app::FileBrowserMode::Build => "Select Project (Dockerfile)",
                  crate::app::FileBrowserMode::Compose => "Select Compose File",
              };
              
-             let items: Vec<ListItem> = entries.iter().enumerate().map(|(i, path)| {
-                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                 let icon = if path.is_dir() { "[D] " } else { "[F] " };
+             let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, item)| {
+                 let name = item.path.file_name().unwrap_or_default().to_string_lossy();
+                 
+                 // Tree Indentation Logic
+                 let mut prefix = String::new();
+                 for _ in 0..item.depth {
+                     prefix.push_str("│   ");
+                 }
+                 
+                 let branch = if item.is_last { "└── " } else { "├── " };
+                 // Only add branch if depth > 0, otherwise it's root level
+                 // Actually, even at root level 0, we want branches if it's a list.
+                 // But typically root items in a file list don't have branches to the left unless they are children of something.
+                 // In our case, `items` contains children of `current_path`.
+                 // So they are all depth 0 relative to the view?
+                 // No, `load_directory_tree` starts recursion at depth 0.
+                 // So top level items have depth 0.
+                 
+                 // Let's make it look like the user requested:
+                 // Root
+                 // ├── Child 1
+                 // └── Child 2
+                 
+                 let tree_prefix = if item.depth > 0 {
+                     format!("{}{}", prefix, branch)
+                 } else {
+                     // Top level items
+                     if item.is_last { "└── ".to_string() } else { "├── ".to_string() }
+                 };
+
+                 let icon = if item.is_dir { 
+                     if item.expanded { IconSet::FOLDER_OPEN } else { IconSet::FOLDER_CLOSED }
+                 } else { 
+                     IconSet::get_file_icon(&name) 
+                 };
+                 
+                 let display_name = format!("{} {} {}", tree_prefix, icon, name);
+                 
                  let style = if Some(i) == list_state.selected() {
                      Style::default().fg(Color::White).bg(Color::DarkGray)
                  } else {
                      Style::default().fg(Color::Gray)
                  };
-                 ListItem::new(format!("{}{}", icon, name)).style(style)
+                 
+                 // Highlight Dockerfile
+                 let final_style = if name == "Dockerfile" || name == "docker-compose.yml" {
+                      if Some(i) == list_state.selected() {
+                          style.add_modifier(Modifier::BOLD).fg(Color::Yellow)
+                      } else {
+                          style.add_modifier(Modifier::BOLD).fg(Color::Yellow)
+                      }
+                 } else {
+                     style
+                 };
+
+                 ListItem::new(display_name).style(final_style)
              }).collect();
 
              let instructions = match mode {
-                 crate::app::FileBrowserMode::Build => " SPACE: Detect Framework | ENTER: Open/Select | BACKSPACE: Go Back ",
-                 crate::app::FileBrowserMode::Compose => " SPACE: Generate/Skip | ENTER: Open/Select | BACKSPACE: Go Back ",
+                 crate::app::FileBrowserMode::Build => " ENTER: Expand/Select | SPACE: Detect | BACKSPACE: Go Up ",
+                 crate::app::FileBrowserMode::Compose => " ENTER: Expand/Select | SPACE: Generate | BACKSPACE: Go Up ",
              };
 
-             let list = List::new(items)
+             let list = List::new(list_items)
                  .block(Block::default()
                     .borders(Borders::ALL)
                     .title(format!("{} - {}", title, current_path.display()))
@@ -576,7 +657,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
              let mut state = list_state.clone();
              f.render_stateful_widget(list, inner, &mut state);
         },
-        crate::app::WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
+        crate::app::WizardStep::DockerfileGenerator { path, detected_framework, detected_version, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
              let title = " Dockerfile Generator ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -603,7 +684,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             } else {
                 Style::default().fg(Color::Green)
             };
-            let framework_p = Paragraph::new(detected_framework.display_name())
+            let framework_p = Paragraph::new(format!("{} ({})", detected_framework.display_name(), detected_version))
                 .block(Block::default().borders(Borders::ALL).title("Detected Framework").border_style(if *focused_option == 0 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) }))
                 .style(framework_style);
             f.render_widget(framework_p, chunks[2]);
@@ -703,8 +784,8 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
-        crate::app::WizardStep::ComposeServiceSelection { path, selected_services, focused_index } => {
-            let title = " Select Services ";
+        crate::app::WizardStep::ComposeServiceSelection { path, selected_services, focused_index, all_services } => {
+            let title = " Review Services ";
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -722,9 +803,8 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(Color::DarkGray)));
             f.render_widget(path_p, chunks[1]);
 
-            let services = ["MySQL", "PostgreSQL", "Redis", "Nginx"];
-            let items: Vec<ListItem> = services.iter().enumerate().map(|(i, svc)| {
-                let is_selected = selected_services.contains(&svc.to_string());
+            let items: Vec<ListItem> = all_services.iter().enumerate().map(|(i, svc)| {
+                let is_selected = selected_services.contains(svc);
                 let check = if is_selected { "[x]" } else { "[ ]" };
                 let style = if i == *focused_index {
                     Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -735,7 +815,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             }).collect();
             
             // Add "Next" button at the end
-            let next_style = if *focused_index == services.len() {
+            let next_style = if *focused_index == all_services.len() {
                 Style::default().fg(Color::Black).bg(Color::Green)
             } else {
                 Style::default().fg(Color::Gray)
@@ -744,14 +824,14 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             all_items.push(ListItem::new("[ Next > ]").style(next_style));
 
             let list = List::new(all_items)
-                .block(Block::default().borders(Borders::ALL).title("Select Additional Services").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Services Found").border_style(Style::default().fg(Color::DarkGray)));
             f.render_widget(list, chunks[2]);
 
             let help = Paragraph::new("SPACE: Toggle | UP/DOWN: Navigate | ENTER: Next | ESC: Back")
                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
-        crate::app::WizardStep::ResourceAllocation { path: _, services: _, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem } => {
+        crate::app::WizardStep::ResourceAllocation { path: _, services: _, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem, all_services: _ } => {
              let title = " Resource Allocation ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -798,6 +878,40 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[4]);
         },
+        crate::app::WizardStep::OverwriteConfirm { path, detected_framework: _, detected_version: _, port: _ } => {
+             let block = Block::default()
+                .title(" ⚠️  WARNING: File Exists ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .style(Style::default().bg(Color::Black));
+            
+            let area = centered_rect(50, 30, inner);
+            f.render_widget(Clear, area);
+            f.render_widget(block.clone(), area);
+            
+            let inner = block.inner(area);
+            
+            let text = vec![
+                Line::from(Span::styled("Dockerfile already exists!", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(format!("Target: {}/Dockerfile", path.display())),
+                Line::from(""),
+                Line::from("Do you want to backup the existing file and overwrite it?"),
+                Line::from("The old file will be renamed to Dockerfile.bak"),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("[Y] Backup & Overwrite", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("   "),
+                    Span::styled("[N] Cancel", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                ]),
+            ];
+            
+            let p = Paragraph::new(text)
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(Wrap { trim: true });
+            
+            f.render_widget(p, inner);
+        },
         crate::app::WizardStep::Janitor { items, list_state, loading } => {
              let title = " Janitor - Cleanup ";
              let chunks = Layout::default()
@@ -820,9 +934,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, item)| {
                     let check = if item.selected { "[x]" } else { "[ ]" };
                     let kind_str = match item.kind {
-                        crate::app::JanitorItemKind::Image => "IMG",
-                        crate::app::JanitorItemKind::Volume => "VOL",
-                        crate::app::JanitorItemKind::Container => "CON",
+                        crate::app::JanitorItemKind::Image => IconSet::IMAGE,
+                        crate::app::JanitorItemKind::Volume => IconSet::VOLUME,
+                        crate::app::JanitorItemKind::Container => IconSet::CONTAINER,
                     };
                     
                     let size_str = if item.size > 0 {
@@ -911,6 +1025,48 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let p = Paragraph::new(text).wrap(Wrap { trim: true });
             f.render_widget(p, inner);
         },
+        crate::app::WizardStep::Settings { focused_field, temp_config } => {
+             let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Theme
+                    Constraint::Length(3), // Braille
+                    Constraint::Length(3), // Refresh
+                    Constraint::Length(3), // Confirm
+                    Constraint::Min(1),    // Help
+                ])
+                .split(inner);
+
+             let style = |idx| if *focused_field == idx { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Gray) };
+             
+             // Theme
+             let p = Paragraph::new(format!("< {} > (Left/Right)", temp_config.theme))
+                .block(Block::default().borders(Borders::ALL).title("Theme").border_style(style(0)));
+             f.render_widget(p, layout[0]);
+
+             // Braille
+             let check = if temp_config.show_braille { "[x]" } else { "[ ]" };
+             let p = Paragraph::new(format!("{} Enable Braille Graphs", check))
+                .block(Block::default().borders(Borders::ALL).title("Appearance").border_style(style(1)));
+             f.render_widget(p, layout[1]);
+
+             // Refresh Rate
+             let p = Paragraph::new(format!("< {} ms > (Left/Right)", temp_config.refresh_rate_ms))
+                .block(Block::default().borders(Borders::ALL).title("Refresh Interval").border_style(style(2)));
+             f.render_widget(p, layout[2]);
+
+             // Confirm Delete
+             let check = if temp_config.confirm_before_delete { "[x]" } else { "[ ]" };
+             let p = Paragraph::new(format!("{} Confirm on Delete", check))
+                .block(Block::default().borders(Borders::ALL).title("Safety").border_style(style(3)));
+             f.render_widget(p, layout[3]);
+
+             // Help
+             let help = Paragraph::new("[S] Save & Apply | [R] Reset | [Esc] Cancel")
+                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center);
+             f.render_widget(help, layout[4]);
+        },
 
     }
 }
@@ -981,6 +1137,70 @@ pub fn calculate_cpu_usage(stats: &ContainerStats, prev_stats: &Option<Container
         (cpu_delta / system_delta) * num_cpus * 100.0
     } else {
         0.0
+    }
+}
+
+fn draw_details_popup(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
+    let block = Block::default()
+        .title(" Container Details ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(Color::Black));
+    
+    let area = centered_rect(60, 60, area);
+    f.render_widget(Clear, area);
+    f.render_widget(block.clone(), area);
+
+    let inner = block.inner(area);
+
+    if let Some(inspect) = &app.current_inspection {
+        let mut lines = Vec::new();
+        
+        lines.push(Line::from(vec![Span::styled("ID: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.id.as_str())]));
+        lines.push(Line::from(vec![Span::styled("Name: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.name.as_deref().unwrap_or("?"))]));
+        lines.push(Line::from(vec![Span::styled("Image: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.config.as_ref().map(|c| c.image.as_str()).unwrap_or("?"))]));
+        lines.push(Line::from(""));
+
+        // Network
+        lines.push(Line::from(Span::styled("Network:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        if let Some(net) = &inspect.network_settings {
+             if let Some(networks) = &net.networks {
+                 for (name, settings) in networks {
+                     lines.push(Line::from(format!("  {}: {}", name, settings.ip_address.as_deref().unwrap_or(""))));
+                 }
+             }
+             // Ports
+             if let Some(ports) = &net.ports {
+                 lines.push(Line::from("  Ports:"));
+                 for (port, bindings) in ports {
+                     if let Some(binds) = bindings {
+                         for b in binds {
+                             lines.push(Line::from(format!("    {} -> {}:{}", port, b.host_ip, b.host_port)));
+                         }
+                     }
+                 }
+             }
+        }
+        lines.push(Line::from(""));
+
+        // Env Vars
+        lines.push(Line::from(Span::styled("Environment Variables:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        if let Some(config) = &inspect.config {
+            if let Some(env) = &config.env {
+                for e in env {
+                    lines.push(Line::from(format!("  {}", e)));
+                }
+            }
+        }
+
+        let p = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((0, 0)); 
+        
+        f.render_widget(p, inner);
+    } else {
+        let p = Paragraph::new("Loading details...").alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(p, inner);
     }
 }
 

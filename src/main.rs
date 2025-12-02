@@ -20,6 +20,7 @@ mod app;
 mod config;
 mod docker;
 mod ui;
+mod theme;
 
 use app::App;
 use docker::{Container, ContainerStats, ContainerInspection, DockerClient};
@@ -31,10 +32,43 @@ enum Action {
     Restart(String),
     Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String },
     Build { tag: String, path: std::path::PathBuf, mount: bool },
-    ComposeUp { path: std::path::PathBuf },
+    ComposeUp { path: std::path::PathBuf, override_path: Option<std::path::PathBuf> },
     Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
     ScanJanitor,
     CleanJanitor(Vec<app::JanitorItem>),
+    Delete(String),
+    RefreshContainers,
+}
+
+fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+
+    println!("Entering container shell for {}...", container_id);
+    
+    // Try bash first
+    let status = std::process::Command::new("docker")
+        .arg("exec")
+        .arg("-it")
+        .arg(container_id)
+        .arg("/bin/bash")
+        .status();
+
+    // If bash fails, try sh
+    if status.is_err() || !status.unwrap().success() {
+        println!("Bash failed, trying sh...");
+        let _ = std::process::Command::new("docker")
+            .arg("exec")
+            .arg("-it")
+            .arg(container_id)
+            .arg("/bin/sh")
+            .status();
+    }
+
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -54,20 +88,30 @@ async fn main() -> Result<()> {
     let (tx_action, mut rx_action) = mpsc::channel::<Action>(10);
     let (tx_action_result, mut rx_action_result) = mpsc::channel::<String>(10);
     let (tx_janitor_items, mut rx_janitor_items) = mpsc::channel::<Vec<app::JanitorItem>>(10);
+    let (tx_refresh, mut rx_refresh) = mpsc::channel::<()>(1);
 
     // Docker Client (Shared)
     let docker_client = std::sync::Arc::new(DockerClient::new());
     
-    // Task 1: Container Lister (Fast Loop)
+    // Task 1: Container Lister (Event Driven + Slow Poll)
     let client_clone1 = docker_client.clone();
     tokio::spawn(async move {
+        // Initial fetch
+        if let Ok(containers) = client_clone1.list_containers().await {
+             let _ = tx_containers.send(containers).await;
+        }
+
         loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {}, // Slow poll
+                _ = rx_refresh.recv() => {}, // Event triggered
+            }
+            
             if let Ok(containers) = client_clone1.list_containers().await {
                 if tx_containers.send(containers).await.is_err() {
                     break;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 
@@ -172,11 +216,39 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Task 4: Action Executor
+    // Task 4: Docker Events Listener
+    let client_clone4 = docker_client.clone();
+    let tx_refresh_clone = tx_refresh.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(mut stream) = client_clone4.get_events_stream().await {
+                let mut buffer = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buffer).await {
+                        Ok(0) => break, // Connection closed
+                        Ok(_) => {
+                            // Any data means an event occurred
+                            let _ = tx_refresh_clone.send(()).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            // Retry delay
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+
+    // Task 5: Action Executor
+    let tx_refresh_action = tx_refresh.clone();
     tokio::spawn(async move {
         let docker = Docker::connect_with_local_defaults().unwrap();
         while let Some(action) = rx_action.recv().await {
             let res = match action {
+                Action::RefreshContainers => {
+                    let _ = tx_refresh_action.send(()).await;
+                    "Refreshed containers".to_string()
+                },
                 Action::ScanJanitor => {
                     let _ = tx_action_result.send("Scanning for junk...".to_string()).await;
                     let mut items = Vec::new();
@@ -401,24 +473,52 @@ async fn main() -> Result<()> {
                          }
                      }
                 }
-                Action::ComposeUp { path } => {
+                Action::ComposeUp { path, override_path } => {
                     let _ = tx_action_result.send("Running docker compose up...".to_string()).await;
-                    let output = std::process::Command::new("docker")
-                        .arg("compose")
-                        .arg("up")
-                        .arg("-d")
-                        .current_dir(path)
-                        .output();
+                    
+                    let (work_dir, main_file) = if path.is_file() {
+                        (path.parent().unwrap_or(&path).to_path_buf(), path.file_name().unwrap().to_string_lossy().to_string())
+                    } else {
+                        (path.clone(), "docker-compose.yml".to_string())
+                    };
+
+                    let mut cmd = std::process::Command::new("docker");
+                    cmd.arg("compose")
+                       .arg("-f")
+                       .arg(&main_file);
+                    
+                    if let Some(ref ovr) = override_path {
+                        if let Some(ovr_name) = ovr.file_name() {
+                            cmd.arg("-f").arg(ovr_name);
+                        }
+                    }
+
+                    cmd.arg("up")
+                       .arg("-d")
+                       .current_dir(&work_dir);
+
+                    let output = cmd.output();
                         
                     match output {
                         Ok(o) => {
+                            // Cleanup override file
+                            if let Some(ovr) = override_path {
+                                let _ = std::fs::remove_file(ovr);
+                            }
+
                             if o.status.success() {
                                 "Compose Up Successful".to_string()
                             } else {
                                 format!("Compose Failed: {}", String::from_utf8_lossy(&o.stderr))
                             }
                         },
-                        Err(e) => format!("Failed to run compose: {}", e),
+                        Err(e) => {
+                             // Cleanup override file
+                            if let Some(ovr) = override_path {
+                                let _ = std::fs::remove_file(ovr);
+                            }
+                            format!("Failed to run compose: {}", e)
+                        },
                     }
                 }
                 Action::Replace { old_id, image, name, ports, env, cpu, memory } => {
@@ -498,6 +598,13 @@ async fn main() -> Result<()> {
                         Err(e) => format!("Failed to create: {}", e),
                     }
                 }
+                Action::Delete(id) => {
+                    let _ = tx_action_result.send(format!("Removing {}...", id)).await;
+                    match docker.remove_container(&id, Some(RemoveContainerOptions { force: true, ..Default::default() })).await {
+                        Ok(_) => format!("Removed container {}", &id[..12]),
+                        Err(e) => format!("Failed to remove: {}", e),
+                    }
+                }
             };
             let _ = tx_action_result.send(res).await;
         }
@@ -505,10 +612,19 @@ async fn main() -> Result<()> {
 
     // App State
     let mut app = App::new();
-    let tick_rate = Duration::from_millis(200);
     let mut last_tick = std::time::Instant::now();
+    let mut last_user_event = std::time::Instant::now();
+    let idle_timeout = Duration::from_secs(5);
+    let idle_tick_rate = Duration::from_secs(2);
 
     loop {
+        let is_idle = last_user_event.elapsed() > idle_timeout;
+        let tick_rate = if is_idle {
+            idle_tick_rate
+        } else {
+            Duration::from_millis(app.config.refresh_rate_ms)
+        };
+        
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         let timeout = tick_rate
@@ -516,6 +632,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if crossterm::event::poll(timeout)? {
+            last_user_event = std::time::Instant::now();
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => {
@@ -524,6 +641,9 @@ async fn main() -> Result<()> {
                     } else {
                         break;
                     }
+                }
+                KeyCode::F(5) => {
+                    let _ = tx_action.send(Action::RefreshContainers).await;
                 }
                 KeyCode::Char('c') | KeyCode::Tab => {
                     if app.wizard.is_none() {
@@ -538,18 +658,31 @@ async fn main() -> Result<()> {
                     _ => {
                         if app.wizard.is_some() {
                                 if let Some(wizard_action) = app.wizard_handle_key(key.code) {
-                                    let action = match wizard_action {
-                                        app::WizardAction::Create { image, name, ports, env, cpu, memory } => Action::Create { image, name, ports, env, cpu, memory },
-                                        app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
-                                        app::WizardAction::ComposeUp { path } => Action::ComposeUp { path },
-                                        app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory } => Action::Replace { old_id, image, name, ports, env, cpu, memory },
-                                        app::WizardAction::ScanJanitor => Action::ScanJanitor,
-                                        app::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
-                                    };
-                                    let _ = tx_action.send(action).await;
+                                    if let app::WizardAction::Close = wizard_action {
+                                        app.wizard = None;
+                                    } else {
+                                        let action = match wizard_action {
+                                            app::WizardAction::Create { image, name, ports, env, cpu, memory } => Action::Create { image, name, ports, env, cpu, memory },
+                                            app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
+                                            app::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
+                                            app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory } => Action::Replace { old_id, image, name, ports, env, cpu, memory },
+                                            app::WizardAction::ScanJanitor => Action::ScanJanitor,
+                                            app::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
+                                            app::WizardAction::Close => unreachable!(),
+                                        };
+                                        let _ = tx_action.send(action).await;
+                                    }
                                 }
                         } else {
                             match key.code {
+                                KeyCode::Enter => {
+                                    app.show_details = !app.show_details;
+                                }
+                                KeyCode::Delete | KeyCode::Char('x') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        let _ = tx_action.send(Action::Delete(c.id.clone())).await;
+                                    }
+                                }
                                 KeyCode::Down | KeyCode::Char('j') => {
                                     app.next();
                                     if let Some(c) = app.get_selected_container() {
@@ -562,7 +695,7 @@ async fn main() -> Result<()> {
                                         let _ = tx_target.send(Some(c.id.clone()));
                                     }
                                 }
-                                KeyCode::Char('e') => {
+                                KeyCode::Char('E') => {
                                     if let Some(c) = app.get_selected_container() {
                                         if let Some(inspect) = &app.current_inspection {
                                             let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
@@ -630,6 +763,11 @@ async fn main() -> Result<()> {
                                                 },
                                             });
                                         }
+                                    }
+                                }
+                                KeyCode::Char('e') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        let _ = enter_container_shell(&c.id, &mut terminal);
                                     }
                                 }
                                 KeyCode::Char('b') => {

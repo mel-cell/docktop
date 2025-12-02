@@ -82,6 +82,28 @@ impl Framework {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct TreeItem {
+    pub path: std::path::PathBuf,
+    pub depth: usize,
+    pub is_dir: bool,
+    pub expanded: bool,
+    pub is_last: bool, // To draw └── vs ├──
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ComposeFile {
+    pub services: std::collections::HashMap<String, ServiceConfig>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ServiceConfig {
+    #[allow(dead_code)]
+    pub image: Option<String>,
+    #[allow(dead_code)]
+    pub build: Option<serde_yaml::Value>,
+}
+
 #[derive(Clone)]
 pub enum WizardStep {
     ModeSelection { selected_index: usize },
@@ -97,14 +119,15 @@ pub enum WizardStep {
         port_status: PortStatus,
     },
     FileBrowser {
-        current_path: std::path::PathBuf,
+        current_path: std::path::PathBuf, // Root of the tree view
         list_state: ListState,
-        entries: Vec<std::path::PathBuf>,
+        items: Vec<TreeItem>, // Flattened tree items
         mode: FileBrowserMode,
     },
     DockerfileGenerator {
         path: std::path::PathBuf,
         detected_framework: Framework,
+        detected_version: String,
         manual_selection_open: bool,
         manual_selected_index: usize,
         port: String,
@@ -129,10 +152,12 @@ pub enum WizardStep {
         path: std::path::PathBuf,
         selected_services: Vec<String>,
         focused_index: usize,
+        all_services: Vec<String>,
     },
     ResourceAllocation {
         path: std::path::PathBuf,
         services: Vec<String>,
+        all_services: Vec<String>, // Added to support going back
         cpu_limit: String,
         mem_limit: String,
         focused_field: usize,
@@ -144,6 +169,16 @@ pub enum WizardStep {
         list_state: ListState,
         loading: bool,
     },
+    OverwriteConfirm {
+        path: std::path::PathBuf,
+        detected_framework: Framework,
+        detected_version: String,
+        port: String,
+    },
+    Settings {
+        focused_field: usize,
+        temp_config: Config,
+    },
     Error(String),
 }
 
@@ -151,10 +186,11 @@ pub enum WizardStep {
 pub enum WizardAction {
     Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String },
     Build { tag: String, path: std::path::PathBuf, mount: bool },
-    ComposeUp { path: std::path::PathBuf },
+    ComposeUp { path: std::path::PathBuf, override_path: Option<std::path::PathBuf> },
     Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
     ScanJanitor,
     CleanJanitor(Vec<JanitorItem>),
+    Close,
 }
 
 #[derive(Clone)]
@@ -178,6 +214,7 @@ pub struct App {
     pub net_rx_history: Vec<(f64, f64)>,
     pub net_tx_history: Vec<(f64, f64)>,
     pub x_axis_bounds: [f64; 2],
+    pub show_details: bool,
     pub net_axis_bounds: [f64; 2],
     pub config: Config,
     pub fishes: Vec<Fish>,
@@ -239,6 +276,7 @@ impl App {
             net_rx_history: vec![],
             net_tx_history: vec![],
             x_axis_bounds: [0.0, 100.0],
+            show_details: false,
             net_axis_bounds: [0.0, 100.0],
             config: Config::load(),
             fishes,
@@ -377,64 +415,117 @@ impl App {
         }
     }
 
-    fn load_directory_entries(path: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let mut entries = Vec::new();
-        // Add parent directory option if not at root
-        if let Some(parent) = path.parent() {
-            entries.push(parent.to_path_buf());
-        }
-        
-        if let Ok(read_dir) = std::fs::read_dir(path) {
-            for entry in read_dir.flatten() {
-                entries.push(entry.path());
-            }
-        }
-        entries.sort_by(|a, b| {
-            let a_is_dir = a.is_dir();
-            let b_is_dir = b.is_dir();
-            if a_is_dir && !b_is_dir {
-                std::cmp::Ordering::Less
-            } else if !a_is_dir && b_is_dir {
-                std::cmp::Ordering::Greater
-            } else {
-                a.file_name().cmp(&b.file_name())
-            }
-        });
-        entries
+    fn load_directory_tree(root: &std::path::Path, expanded_paths: &std::collections::HashSet<std::path::PathBuf>) -> Vec<TreeItem> {
+        let mut items = Vec::new();
+        Self::build_tree_recursive(root, 0, expanded_paths, &mut items);
+        // Remove the root itself from the list if we only want to show contents, 
+        // OR keep it. Usually file pickers show contents. 
+        // But for a tree view, showing the root as top level is nice.
+        // Let's actually just show contents of the current_path to start with.
+        // Wait, the user wants a tree.
+        // Let's make the list start with the contents of `root`.
+        items
     }
 
-    pub fn detect_framework(path: &std::path::Path) -> Framework {
+    fn build_tree_recursive(path: &std::path::Path, depth: usize, expanded_paths: &std::collections::HashSet<std::path::PathBuf>, result: &mut Vec<TreeItem>) {
+        if let Ok(entries) = fs::read_dir(path) {
+            let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+            entries.sort_by_key(|e| {
+                let is_dir = e.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                (!is_dir, e.file_name()) // Dirs first
+            });
+
+            let count = entries.len();
+            for (i, entry) in entries.iter().enumerate() {
+                let path = entry.path();
+                let is_dir = path.is_dir();
+                let is_last = i == count - 1;
+                
+                let expanded = expanded_paths.contains(&path);
+                
+                result.push(TreeItem {
+                    path: path.clone(),
+                    depth,
+                    is_dir,
+                    expanded,
+                    is_last,
+                });
+
+                if is_dir && expanded {
+                    Self::build_tree_recursive(&path, depth + 1, expanded_paths, result);
+                }
+            }
+        }
+    }
+
+    fn toggle_tree_expand(items: &Vec<TreeItem>, index: usize, expanded_paths: &mut std::collections::HashSet<std::path::PathBuf>) -> bool {
+        if let Some(item) = items.get(index) {
+            if item.is_dir {
+                if expanded_paths.contains(&item.path) {
+                    expanded_paths.remove(&item.path);
+                } else {
+                    expanded_paths.insert(item.path.clone());
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn detect_framework(path: &std::path::Path) -> (Framework, String) {
         if let Ok(content) = fs::read_to_string(path.join("composer.json")) {
             if content.contains("laravel/framework") {
-                return Framework::Laravel;
+                let version = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    v["require"]["php"].as_str()
+                        .map(|s| s.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric() || *c == '.').collect::<String>())
+                        .unwrap_or("8.2".to_string())
+                } else { "8.2".to_string() };
+                // If empty (e.g. *), fallback
+                let version = if version.is_empty() { "8.2".to_string() } else { version };
+                return (Framework::Laravel, version);
             }
         }
         if let Ok(content) = fs::read_to_string(path.join("package.json")) {
+            let json: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
+            let node_version = json["engines"]["node"].as_str()
+                .map(|s| s.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric()).collect::<String>())
+                .unwrap_or("18".to_string());
+             let node_version = if node_version.is_empty() { "18".to_string() } else { node_version };
+
             if content.contains("\"next\"") {
-                return Framework::NextJs;
+                return (Framework::NextJs, node_version);
             }
             if content.contains("\"nuxt\"") {
-                return Framework::NuxtJs;
+                return (Framework::NuxtJs, node_version);
             }
         }
         if path.join("go.mod").exists() {
-            return Framework::Go;
+            // Parse go version?
+             if let Ok(content) = fs::read_to_string(path.join("go.mod")) {
+                 for line in content.lines() {
+                     if line.starts_with("go ") {
+                         let v = line.trim_start_matches("go ").trim().to_string();
+                         return (Framework::Go, v);
+                     }
+                 }
+             }
+            return (Framework::Go, "1.21".to_string());
         }
         if let Ok(content) = fs::read_to_string(path.join("requirements.txt")) {
             if content.contains("django") {
-                return Framework::Django;
+                return (Framework::Django, "3.11".to_string()); // Python version default
             }
         }
         if let Ok(content) = fs::read_to_string(path.join("Gemfile")) {
             if content.contains("rails") {
-                return Framework::Rails;
+                return (Framework::Rails, "3.2".to_string()); // Ruby version default
             }
         }
         if path.join("Cargo.toml").exists() {
-            return Framework::Rust;
+            return (Framework::Rust, "latest".to_string());
         }
         
-        Framework::Manual
+        (Framework::Manual, "latest".to_string())
     }
 
     pub fn check_port(port_input: &str) -> PortStatus {
@@ -491,7 +582,8 @@ impl App {
         }
     }
 
-    fn write_advanced_compose_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<()> {
+    // For Scaffolding (Creating new project from scratch)
+    fn generate_new_compose_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<()> {
         if !path.exists() {
             std::fs::create_dir_all(path)?;
         }
@@ -518,7 +610,6 @@ impl App {
                 },
                 "Redis" => {
                     content.push_str("\n  redis:\n    image: redis:alpine\n    ports:\n      - \"6379:6379\"\n");
-                    // Auto-limit for Redis if auto-mode was used (heuristic: if app has limits, redis gets smaller ones)
                     if !cpu.is_empty() {
                          content.push_str("    deploy:\n      resources:\n        limits:\n          cpus: '0.5'\n          memory: 512M\n");
                     }
@@ -531,6 +622,29 @@ impl App {
         }
 
         std::fs::write(path.join("docker-compose.yml"), content)
+    }
+
+    // For Existing Projects (The Merge Strategy)
+    fn generate_override_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<std::path::PathBuf> {
+        // Create a minimal struct for override
+        // We construct YAML manually string for simplicity and control
+        let mut content = String::from("version: '3.8'\nservices:\n");
+        
+        for svc in services {
+            content.push_str(&format!("  {}:\n", svc));
+            content.push_str("    deploy:\n      resources:\n        limits:\n");
+            
+            if !cpu.is_empty() {
+                content.push_str(&format!("          cpus: '{}'\n", cpu));
+            }
+            if !mem.is_empty() {
+                content.push_str(&format!("          memory: {}\n", mem));
+            }
+        }
+        
+        let override_path = path.parent().unwrap_or(path).join(".docktop-override.yml");
+        std::fs::write(&override_path, content)?;
+        Ok(override_path)
     }
 
     fn detect_resources() -> (usize, u64) {
@@ -557,10 +671,10 @@ impl App {
         (cpu_str, mem_str)
     }
 
-    fn write_dockerfile(path: &std::path::Path, framework: &Framework, port: &str) -> std::io::Result<()> {
+    fn write_dockerfile(path: &std::path::Path, framework: &Framework, version: &str, port: &str) -> std::io::Result<()> {
         let content = match framework {
-            Framework::Laravel => format!(r#"# Generated by DockTop for Laravel
-FROM php:8.2-fpm
+            Framework::Laravel => format!(r#"# Generated by DockTop for Laravel (PHP {})
+FROM php:{}-fpm
 
 RUN apt-get update && apt-get install -y git curl libpng-dev libonig-dev libxml2-dev zip unzip
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
@@ -572,9 +686,9 @@ RUN composer install
 
 CMD php artisan serve --host=0.0.0.0 --port={}
 EXPOSE {}
-"#, port, port),
-            Framework::NextJs => format!(r#"# Generated by DockTop for Next.js
-FROM node:18-alpine AS base
+"#, version, version, port, port),
+            Framework::NextJs => format!(r#"# Generated by DockTop for Next.js (Node {})
+FROM node:{}-alpine AS base
 
 FROM base AS deps
 WORKDIR /app
@@ -596,9 +710,9 @@ COPY --from=builder /app/.next/static ./.next/static
 
 EXPOSE {}
 CMD ["node", "server.js"]
-"#, port),
-            Framework::Go => format!(r#"# Generated by DockTop for Go
-FROM golang:1.21-alpine
+"#, version, version, port),
+            Framework::Go => format!(r#"# Generated by DockTop for Go (Go {})
+FROM golang:{}-alpine
 
 WORKDIR /app
 COPY go.mod ./
@@ -610,9 +724,9 @@ RUN go build -o /main
 
 EXPOSE {}
 CMD ["/main"]
-"#, port),
+"#, version, version, port),
             Framework::Rust => format!(r#"# Generated by DockTop for Rust
-FROM rust:1.75-alpine as builder
+FROM rust:{}-alpine as builder
 WORKDIR /usr/src/app
 COPY . .
 RUN cargo install --path .
@@ -621,7 +735,7 @@ FROM alpine:latest
 COPY --from=builder /usr/local/cargo/bin/app /usr/local/bin/app
 EXPOSE {}
 CMD ["app"]
-"#, port),
+"#, version, port),
             _ => format!("FROM alpine\nWORKDIR /app\nCOPY . .\nEXPOSE {}\nCMD [\"/app/main\"]", port),
         };
         
@@ -638,8 +752,8 @@ CMD ["app"]
             match &mut wizard.step {
                 WizardStep::ModeSelection { selected_index } => {
                     match key {
-                        KeyCode::Up => if *selected_index > 0 { *selected_index -= 1 } else { *selected_index = 3 },
-                        KeyCode::Down => *selected_index = (*selected_index + 1) % 4,
+                        KeyCode::Up => if *selected_index > 0 { *selected_index -= 1 } else { *selected_index = 4 },
+                        KeyCode::Down => *selected_index = (*selected_index + 1) % 5,
                         KeyCode::Enter => {
                             if *selected_index == 0 {
                                 next_step = Some(WizardStep::QuickRunInput {
@@ -662,16 +776,23 @@ CMD ["app"]
                                     loading: true,
                                 });
                                 wizard_action = Some(WizardAction::ScanJanitor);
+                            } else if *selected_index == 4 {
+                                next_step = Some(WizardStep::Settings {
+                                    focused_field: 0,
+                                    temp_config: self.config.clone(),
+                                });
                             } else {
                                 let current_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                                let entries = Self::load_directory_entries(&current_path);
+                                let expanded_paths = std::collections::HashSet::new(); // Start with nothing expanded
+                                let items = Self::load_directory_tree(&current_path, &expanded_paths);
+                                
                                 let mut state = ListState::default();
                                 state.select(Some(0));
                                 
                                 next_step = Some(WizardStep::FileBrowser {
                                     current_path,
                                     list_state: state,
-                                    entries,
+                                    items,
                                     mode: if *selected_index == 1 { FileBrowserMode::Build } else { FileBrowserMode::Compose },
                                 });
                             }
@@ -755,7 +876,7 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::FileBrowser { current_path, list_state, entries, mode } => {
+                WizardStep::FileBrowser { current_path, list_state, items, mode } => {
                     match key {
                         KeyCode::Up => {
                             let i = match list_state.selected() {
@@ -766,57 +887,70 @@ CMD ["app"]
                         }
                         KeyCode::Down => {
                             let i = match list_state.selected() {
-                                Some(i) => if i >= entries.len() - 1 { entries.len() - 1 } else { i + 1 },
+                                Some(i) => if i >= items.len() - 1 { items.len() - 1 } else { i + 1 },
                                 None => 0,
                             };
                             list_state.select(Some(i));
                         }
                         KeyCode::Char(' ') => {
-                            if *mode == FileBrowserMode::Build {
-                                let framework = Self::detect_framework(current_path);
-                                next_step = Some(WizardStep::DockerfileGenerator {
-                                    path: current_path.clone(),
-                                    detected_framework: framework.clone(),
-                                    manual_selection_open: false,
-                                    manual_selected_index: 0,
-                                    port: framework.default_port().to_string(),
-                                    editing_port: false,
-                                    focused_option: 0,
-                                    port_status: PortStatus::None,
-                                });
-                            } else if *mode == FileBrowserMode::Compose {
-                                let has_compose = current_path.join("docker-compose.yml").exists() || current_path.join("docker-compose.yaml").exists();
-                                if has_compose {
-                                    next_step = Some(WizardStep::Processing {
-                                        message: "Running Docker Compose...".to_string(),
-                                        spinner_frame: 0,
+                            // Select logic for Space
+                            if let Some(selected_index) = list_state.selected() {
+                                let item = &items[selected_index];
+                                let path = item.path.clone();
+                                
+                                if *mode == FileBrowserMode::Build {
+                                    let (framework, version) = Self::detect_framework(&path); // Pass path directly
+                                    next_step = Some(WizardStep::DockerfileGenerator {
+                                        path: path.clone(),
+                                        detected_framework: framework.clone(),
+                                        detected_version: version,
+                                        manual_selection_open: false,
+                                        manual_selected_index: 0,
+                                        port: framework.default_port().to_string(),
+                                        editing_port: false,
+                                        focused_option: 0,
+                                        port_status: PortStatus::None,
                                     });
-                                    action_msg = Some("Running docker compose up".to_string());
-                                    wizard_action = Some(WizardAction::ComposeUp {
-                                        path: current_path.clone(),
-                                    });
-                                } else {
-                                    let target_path = if current_path.ends_with("docker") {
-                                        current_path.clone()
-                                    } else {
-                                        current_path.join("docker")
-                                    };
-                                    next_step = Some(WizardStep::ComposeGenerator {
-                                        path: target_path,
-                                    });
+                                } else if *mode == FileBrowserMode::Compose {
+                                    // Logic for Compose selection...
+                                    // For now, let's keep it simple: Space selects the file/folder
+                                    // But wait, Space in tree view usually doesn't enter.
+                                    // Let's make ENTER toggle folders or select files.
+                                    // And SPACE can be "Quick Action" like before?
+                                    // The user asked for "Select Project".
+                                    
+                                    // Let's stick to:
+                                    // ENTER on Dir: Toggle Expand/Collapse
+                                    // ENTER on File: Select it
+                                    // SPACE: (Maybe same as Enter for file?)
                                 }
                             }
                         }
                         KeyCode::Enter => {
-                            if !entries.is_empty() {
+                            if !items.is_empty() {
                                 if let Some(selected_index) = list_state.selected() {
-                                    let selected_path = &entries[selected_index];
-                                    if selected_path.is_dir() {
-                                        *current_path = selected_path.clone();
-                                        *entries = Self::load_directory_entries(current_path);
-                                        list_state.select(Some(0));
+                                    let item = &items[selected_index];
+                                    
+                                    if item.is_dir {
+                                        // Reconstruct expanded_paths from current items
+                                        let mut expanded_paths: std::collections::HashSet<std::path::PathBuf> = items.iter()
+                                            .filter(|i| i.expanded)
+                                            .map(|i| i.path.clone())
+                                            .collect();
+                                            
+                                        if Self::toggle_tree_expand(&items, selected_index, &mut expanded_paths) {
+                                            // Rebuild tree
+                                            *items = Self::load_directory_tree(current_path, &expanded_paths);
+                                            
+                                            // Try to keep selection valid
+                                            let new_len = items.len();
+                                            if selected_index >= new_len {
+                                                list_state.select(Some(new_len.saturating_sub(1)));
+                                            }
+                                        }
                                     } else {
                                         // File selected
+                                        let selected_path = &item.path;
                                         if let Some(name) = selected_path.file_name() {
                                             let name_str = name.to_string_lossy();
                                             if *mode == FileBrowserMode::Build && name_str == "Dockerfile" {
@@ -824,17 +958,28 @@ CMD ["app"]
                                                     tag: "my-app:latest".to_string(),
                                                     mount_volume: false,
                                                     focused_field: 0,
-                                                    path: current_path.clone(),
+                                                    path: current_path.clone(), // Use current_path (root) or selected_path? Usually root context.
                                                 });
                                             } else if *mode == FileBrowserMode::Compose && (name_str == "docker-compose.yml" || name_str == "docker-compose.yaml") {
-                                                 next_step = Some(WizardStep::Processing {
-                                                    message: "Running Docker Compose...".to_string(),
-                                                    spinner_frame: 0,
-                                                });
-                                                action_msg = Some("Running docker compose up".to_string());
-                                                wizard_action = Some(WizardAction::ComposeUp {
-                                                    path: current_path.clone(),
-                                                });
+                                                 // PARSE YAML FIRST
+                                                 if let Ok(content) = std::fs::read_to_string(selected_path) {
+                                                     if let Ok(compose) = serde_yaml::from_str::<ComposeFile>(&content) {
+                                                         let mut services: Vec<String> = compose.services.keys().cloned().collect();
+                                                         services.sort();
+                                                         
+                                                         next_step = Some(WizardStep::ComposeServiceSelection {
+                                                             path: selected_path.clone(),
+                                                             selected_services: services.clone(), // Select all by default
+                                                             focused_index: 0,
+                                                             all_services: services, // Need to store all available to know what to render
+                                                         });
+                                                     } else {
+                                                         // Parsing failed, maybe show error? For now fallback to old behavior or error state
+                                                         next_step = Some(WizardStep::Error(format!("Failed to parse {}", name_str)));
+                                                     }
+                                                 } else {
+                                                     next_step = Some(WizardStep::Error(format!("Failed to read {}", name_str)));
+                                                 }
                                             }
                                         }
                                     }
@@ -844,14 +989,17 @@ CMD ["app"]
                         KeyCode::Backspace => {
                             if let Some(parent) = current_path.parent() {
                                 *current_path = parent.to_path_buf();
-                                *entries = Self::load_directory_entries(current_path);
+                                // Reset expanded state when going up? Or keep it?
+                                // Reset is cleaner.
+                                let expanded_paths = std::collections::HashSet::new();
+                                *items = Self::load_directory_tree(current_path, &expanded_paths);
                                 list_state.select(Some(0));
                             }
                         }
                         _ => {}
                     }
                 }
-                WizardStep::DockerfileGenerator { path, detected_framework, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
+                WizardStep::DockerfileGenerator { path, detected_framework, detected_version, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
                      if *manual_selection_open {
                          match key {
                              KeyCode::Up => if *manual_selected_index > 0 { *manual_selected_index -= 1 },
@@ -890,15 +1038,24 @@ CMD ["app"]
                                          port.clear();
                                      },
                                      2 => {
-                                         if let Ok(_) = Self::write_dockerfile(path, detected_framework, port) {
-                                             next_step = Some(WizardStep::BuildConf {
-                                                 tag: "my-app:latest".to_string(),
-                                                 mount_volume: false,
-                                                 focused_field: 0,
+                                         if path.join("Dockerfile").exists() {
+                                             next_step = Some(WizardStep::OverwriteConfirm {
                                                  path: path.clone(),
+                                                 detected_framework: detected_framework.clone(),
+                                                 detected_version: detected_version.clone(),
+                                                 port: port.clone(),
                                              });
                                          } else {
-                                             next_step = Some(WizardStep::Error("Failed to write Dockerfile".to_string()));
+                                             if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                                                 next_step = Some(WizardStep::BuildConf {
+                                                     tag: "my-app:latest".to_string(),
+                                                     mount_volume: false,
+                                                     focused_field: 0,
+                                                     path: path.clone(),
+                                                 });
+                                             } else {
+                                                 next_step = Some(WizardStep::Error("Failed to write Dockerfile".to_string()));
+                                             }
                                          }
                                      },
                                      3 => {
@@ -913,15 +1070,24 @@ CMD ["app"]
                                  }
                              }
                              KeyCode::Char('y') => {
-                                 if let Ok(_) = Self::write_dockerfile(path, detected_framework, port) {
-                                     next_step = Some(WizardStep::BuildConf {
-                                         tag: "my-app:latest".to_string(),
-                                         mount_volume: false,
-                                         focused_field: 0,
+                                 if path.join("Dockerfile").exists() {
+                                     next_step = Some(WizardStep::OverwriteConfirm {
                                          path: path.clone(),
+                                         detected_framework: detected_framework.clone(),
+                                         detected_version: detected_version.clone(),
+                                         port: port.clone(),
                                      });
                                  } else {
-                                     next_step = Some(WizardStep::Error("Failed to write Dockerfile".to_string()));
+                                     if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                                         next_step = Some(WizardStep::BuildConf {
+                                             tag: "my-app:latest".to_string(),
+                                             mount_volume: false,
+                                             focused_field: 0,
+                                             path: path.clone(),
+                                         });
+                                     } else {
+                                         next_step = Some(WizardStep::Error("Failed to write Dockerfile".to_string()));
+                                     }
                                  }
                              }
                              KeyCode::Char('n') => {
@@ -944,6 +1110,87 @@ CMD ["app"]
                              _ => {}
                          }
                      }
+                }
+                WizardStep::OverwriteConfirm { path, detected_framework, detected_version, port } => {
+                    match key {
+                        KeyCode::Enter | KeyCode::Char('y') => {
+                             // Backup
+                             let _ = std::fs::rename(path.join("Dockerfile"), path.join("Dockerfile.bak"));
+                             if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                                  next_step = Some(WizardStep::BuildConf {
+                                      tag: "my-app:latest".to_string(),
+                                      mount_volume: false,
+                                      focused_field: 0,
+                                      path: path.clone(),
+                                  });
+                             } else {
+                                  next_step = Some(WizardStep::Error("Failed to write Dockerfile".to_string()));
+                             }
+                        },
+                        KeyCode::Esc | KeyCode::Char('n') => {
+                             next_step = Some(WizardStep::DockerfileGenerator {
+                                 path: path.clone(),
+                                 detected_framework: detected_framework.clone(),
+                                 detected_version: detected_version.clone(),
+                                 manual_selection_open: false,
+                                 manual_selected_index: 0,
+                                 port: port.clone(),
+                                 editing_port: false,
+                                 focused_option: 0,
+                                 port_status: PortStatus::None,
+                             });
+                        },
+                        _ => {}
+                    }
+                }
+                WizardStep::Settings { focused_field, temp_config } => {
+                    match key {
+                        KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 } else { *focused_field = 3 },
+                        KeyCode::Down => *focused_field = (*focused_field + 1) % 4,
+                        KeyCode::Left | KeyCode::Right => {
+                            if *focused_field == 0 {
+                                let themes = vec!["monochrome", "dracula", "matrix"];
+                                let current_idx = themes.iter().position(|&t| t == temp_config.theme).unwrap_or(0);
+                                let new_idx = if key == KeyCode::Right {
+                                    (current_idx + 1) % themes.len()
+                                } else {
+                                    if current_idx == 0 { themes.len() - 1 } else { current_idx - 1 }
+                                };
+                                temp_config.theme = themes[new_idx].to_string();
+                                self.config.theme_data = crate::config::load_theme(&temp_config.theme);
+                            } else if *focused_field == 2 {
+                                let rates = vec![500, 1000, 2000];
+                                let current_idx = rates.iter().position(|&r| r == temp_config.refresh_rate_ms).unwrap_or(1);
+                                let new_idx = if key == KeyCode::Right {
+                                    (current_idx + 1) % rates.len()
+                                } else {
+                                    if current_idx == 0 { rates.len() - 1 } else { current_idx - 1 }
+                                };
+                                temp_config.refresh_rate_ms = rates[new_idx];
+                            }
+                        }
+                        KeyCode::Enter | KeyCode::Char(' ') => {
+                             match *focused_field {
+                                 1 => temp_config.show_braille = !temp_config.show_braille,
+                                 3 => temp_config.confirm_before_delete = !temp_config.confirm_before_delete,
+                                 _ => {}
+                             }
+                        }
+                        KeyCode::Char('s') => {
+                            self.config = temp_config.clone();
+                            self.config.theme_data = crate::config::load_theme(&self.config.theme);
+                            self.config.save();
+                            wizard_action = Some(WizardAction::Close);
+                        }
+                        KeyCode::Char('r') => {
+                             *temp_config = Config::load();
+                        }
+                        KeyCode::Esc => {
+                            self.config = Config::load();
+                            wizard_action = Some(WizardAction::Close);
+                        }
+                        _ => {}
+                    }
                 }
                 WizardStep::Janitor { items, list_state, loading } => {
                     if !*loading {
@@ -991,29 +1238,30 @@ CMD ["app"]
                                 path: path.clone(),
                                 selected_services: vec![],
                                 focused_index: 0,
+                                all_services: vec!["MySQL".to_string(), "PostgreSQL".to_string(), "Redis".to_string(), "Nginx".to_string()],
                             });
                         }
                         KeyCode::Char('c') | KeyCode::Esc => {
                              let mut state = ListState::default();
                              state.select(Some(0));
+                             let expanded_paths = std::collections::HashSet::new();
                              next_step = Some(WizardStep::FileBrowser {
                                 current_path: path.clone(),
                                 list_state: state,
-                                entries: Self::load_directory_entries(path),
+                                items: Self::load_directory_tree(path, &expanded_paths),
                                 mode: FileBrowserMode::Compose,
                             });
                         }
                         _ => {}
                     }
                 }
-                WizardStep::ComposeServiceSelection { path, selected_services, focused_index } => {
-                    let services = ["MySQL", "PostgreSQL", "Redis", "Nginx"];
+                WizardStep::ComposeServiceSelection { path, selected_services, focused_index, all_services } => {
                     match key {
                         KeyCode::Up => if *focused_index > 0 { *focused_index -= 1 },
-                        KeyCode::Down => if *focused_index < services.len() { *focused_index += 1 },
+                        KeyCode::Down => if *focused_index < all_services.len() { *focused_index += 1 },
                         KeyCode::Char(' ') => {
-                            if *focused_index < services.len() {
-                                let svc = services[*focused_index].to_string();
+                            if *focused_index < all_services.len() {
+                                let svc = all_services[*focused_index].clone();
                                 if let Some(pos) = selected_services.iter().position(|x| *x == svc) {
                                     selected_services.remove(pos);
                                 } else {
@@ -1026,6 +1274,7 @@ CMD ["app"]
                             next_step = Some(WizardStep::ResourceAllocation {
                                 path: path.clone(),
                                 services: selected_services.clone(),
+                                all_services: all_services.clone(),
                                 cpu_limit: String::new(),
                                 mem_limit: String::new(),
                                 focused_field: 0,
@@ -1039,28 +1288,26 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::ResourceAllocation { path, services, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem } => {
+                WizardStep::ResourceAllocation { path, services, all_services, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem } => {
                      match key {
                         KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 },
                         KeyCode::Down | KeyCode::Tab => if *focused_field < 2 { *focused_field += 1 },
                         KeyCode::Char('s') => {
                             let (auto_cpu, auto_mem) = Self::calculate_auto_resources(*detected_mem, *detected_cpu);
-                            if let Ok(_) = Self::write_advanced_compose_file(path, services, &auto_cpu, &auto_mem) {
-                                next_step = Some(WizardStep::Processing {
-                                    message: "Running Docker Compose...".to_string(),
-                                    spinner_frame: 0,
-                                });
-                                action_msg = Some("Running docker compose up".to_string());
-                                wizard_action = Some(WizardAction::ComposeUp {
-                                    path: path.clone(),
-                                });
+                            
+                            let res = if path.is_file() {
+                                // Existing project: Generate override
+                                Self::generate_override_file(path, services, &auto_cpu, &auto_mem).map(Some)
+                                    .map_err(|_| "Failed to write override file".to_string())
                             } else {
-                                next_step = Some(WizardStep::Error("Failed to write docker-compose.yml".to_string()));
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if *focused_field == 2 {
-                                if let Ok(_) = Self::write_advanced_compose_file(path, services, cpu_limit, mem_limit) {
+                                // New project: Generate full file
+                                Self::generate_new_compose_file(path, services, &auto_cpu, &auto_mem)
+                                    .map(|_| None)
+                                    .map_err(|_| "Failed to write docker-compose.yml".to_string())
+                            };
+
+                            match res {
+                                Ok(override_path) => {
                                     next_step = Some(WizardStep::Processing {
                                         message: "Running Docker Compose...".to_string(),
                                         spinner_frame: 0,
@@ -1068,9 +1315,42 @@ CMD ["app"]
                                     action_msg = Some("Running docker compose up".to_string());
                                     wizard_action = Some(WizardAction::ComposeUp {
                                         path: path.clone(),
+                                        override_path,
                                     });
+                                }
+                                Err(msg) => {
+                                    next_step = Some(WizardStep::Error(msg));
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if *focused_field == 2 {
+                                let res = if path.is_file() {
+                                    // Existing project
+                                    Self::generate_override_file(path, services, cpu_limit, mem_limit).map(Some)
+                                        .map_err(|_| "Failed to write override file".to_string())
                                 } else {
-                                    next_step = Some(WizardStep::Error("Failed to write docker-compose.yml".to_string()));
+                                    // New project
+                                    Self::generate_new_compose_file(path, services, cpu_limit, mem_limit)
+                                        .map(|_| None)
+                                        .map_err(|_| "Failed to write docker-compose.yml".to_string())
+                                };
+
+                                match res {
+                                    Ok(override_path) => {
+                                        next_step = Some(WizardStep::Processing {
+                                            message: "Running Docker Compose...".to_string(),
+                                            spinner_frame: 0,
+                                        });
+                                        action_msg = Some("Running docker compose up".to_string());
+                                        wizard_action = Some(WizardAction::ComposeUp {
+                                            path: path.clone(),
+                                            override_path,
+                                        });
+                                    }
+                                    Err(msg) => {
+                                        next_step = Some(WizardStep::Error(msg));
+                                    }
                                 }
                             } else {
                                 *focused_field += 1;
@@ -1095,6 +1375,7 @@ CMD ["app"]
                                 path: path.clone(),
                                 selected_services: services.clone(),
                                 focused_index: 0,
+                                all_services: all_services.clone(),
                             });
                         }
                         _ => {}

@@ -23,6 +23,37 @@ else
     echo "Docker is installed."
 fi
 
+# Check and Install Nerd Fonts
+FONT_DIR="$HOME/.local/share/fonts"
+FONT_NAME="JetBrainsMonoNerdFont"
+
+if [ ! -d "$FONT_DIR" ]; then
+    mkdir -p "$FONT_DIR"
+fi
+
+if ! ls "$FONT_DIR" | grep -q "JetBrainsMono"; then
+    echo "Installing Nerd Fonts (JetBrainsMono) for icons..."
+    # Download font
+    mkdir -p /tmp/nerdfonts
+    curl -fLo "/tmp/nerdfonts/JetBrainsMono.zip" https://github.com/ryanoasis/nerd-fonts/releases/download/v3.1.1/JetBrainsMono.zip
+    
+    # Unzip and install
+    unzip -o "/tmp/nerdfonts/JetBrainsMono.zip" -d "$FONT_DIR"
+    
+    # Clean up
+    rm -rf /tmp/nerdfonts
+    
+    # Update font cache
+    if command -v fc-cache &> /dev/null; then
+        echo "Updating font cache..."
+        fc-cache -f -v > /dev/null
+    fi
+    
+    echo "Nerd Fonts installed! Please configure your terminal to use 'JetBrainsMono Nerd Font'."
+else
+    echo "Nerd Fonts seems to be installed."
+fi
+
 # Build the project
 echo "Building DockTop (Release)..."
 cargo build --release

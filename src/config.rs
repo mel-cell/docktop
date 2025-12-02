@@ -1,19 +1,30 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ratatui::style::Color;
 use std::fs;
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_theme_name")]
     pub theme: String,
+    #[serde(default = "default_show_braille")]
+    pub show_braille: bool,
+    #[serde(default = "default_refresh_rate")]
+    pub refresh_rate_ms: u64,
+    #[serde(default = "default_socket")]
+    pub default_socket: String,
+    #[serde(default = "default_confirm_delete")]
+    pub confirm_before_delete: bool,
+    
     #[serde(skip)]
     pub theme_data: Theme,
 }
 
-fn default_theme_name() -> String {
-    "monochrome".to_string()
-}
+fn default_theme_name() -> String { "monochrome".to_string() }
+fn default_show_braille() -> bool { true }
+fn default_refresh_rate() -> u64 { 1000 }
+fn default_socket() -> String { "unix:///var/run/docker.sock".to_string() }
+fn default_confirm_delete() -> bool { true }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -54,15 +65,25 @@ impl Config {
         let content = fs::read_to_string("config.toml").unwrap_or_default();
         let mut config: Config = toml::from_str(&content).unwrap_or_else(|_| Config {
             theme: default_theme_name(),
+            show_braille: default_show_braille(),
+            refresh_rate_ms: default_refresh_rate(),
+            default_socket: default_socket(),
+            confirm_before_delete: default_confirm_delete(),
             theme_data: Theme::default(),
         });
 
         config.theme_data = load_theme(&config.theme);
         config
     }
+
+    pub fn save(&self) {
+        if let Ok(content) = toml::to_string_pretty(self) {
+            let _ = fs::write("config.toml", content);
+        }
+    }
 }
 
-fn load_theme(theme_name: &str) -> Theme {
+pub fn load_theme(theme_name: &str) -> Theme {
     let path = format!("themes/{}.theme", theme_name);
     let content = fs::read_to_string(&path).unwrap_or_default();
     parse_theme(&content)

@@ -100,6 +100,14 @@ pub struct NetworkSettings {
     pub ports: Option<HashMap<String, Option<Vec<PortBinding>>>>,
     #[serde(rename = "IPAddress")]
     pub ip_address: Option<String>,
+    #[serde(rename = "Networks")]
+    pub networks: Option<HashMap<String, Network>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Network {
+    #[serde(rename = "IPAddress")]
+    pub ip_address: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -176,9 +184,31 @@ impl DockerClient {
     pub async fn get_logs_stream(&self, container_id: &str) -> Result<UnixStream> {
         let mut stream = UnixStream::connect(&self.socket_path).await?;
         let request = format!(
-            "GET /containers/{}/logs?stdout=true&stderr=true&tail=50&follow=true HTTP/1.0\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", 
+            "GET /containers/{}/logs?stdout=true&stderr=true&tail=100&follow=true HTTP/1.0\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n", 
             container_id
         );
+        stream.write_all(request.as_bytes()).await?;
+
+        // Consume HTTP headers
+        let mut buffer = [0u8; 1];
+        let mut headers = Vec::new();
+        loop {
+            stream.read_exact(&mut buffer).await?;
+            headers.push(buffer[0]);
+            
+            if headers.len() >= 4 {
+                if &headers[headers.len()-4..] == b"\r\n\r\n" {
+                    break;
+                }
+            }
+        }
+
+        Ok(stream)
+    }
+
+    pub async fn get_events_stream(&self) -> Result<UnixStream> {
+        let mut stream = UnixStream::connect(&self.socket_path).await?;
+        let request = "GET /events?filters=%7B%22type%22%3A%5B%22container%22%5D%7D HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         stream.write_all(request.as_bytes()).await?;
 
         // Consume HTTP headers
