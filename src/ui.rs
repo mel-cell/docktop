@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Alignment},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, BorderType, Paragraph, Wrap, Table, Row, Cell, Chart, Dataset, Axis, GraphType, List, ListItem, Clear, Sparkline, block::{Title, Position}},
     symbols,
@@ -27,7 +27,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(f.size());
 
-    draw_title_bar(f, app, chunks[0]); // Pass app
+    // Global Background
+    let bg_block = Block::default().style(Style::default().bg(theme.background));
+    f.render_widget(bg_block, f.size());
+
+    draw_title_bar(f, app, chunks[0], theme); // Pass theme
     draw_monitor_section(f, app, chunks[1], theme);
     draw_container_section(f, app, chunks[2], theme);
     draw_logs_section(f, app, chunks[3], theme);
@@ -38,7 +42,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_title_bar(f: &mut Frame, _app: &App, area: Rect) {
+fn draw_title_bar(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
     let host_name = sysinfo::System::host_name().unwrap_or_else(|| "Unknown".to_string());
     let uptime = sysinfo::System::uptime();
     let uptime_str = format!("{:02}:{:02}:{:02}", uptime / 3600, (uptime % 3600) / 60, uptime % 60);
@@ -46,9 +50,9 @@ fn draw_title_bar(f: &mut Frame, _app: &App, area: Rect) {
     let text = format!(" DockTop v0.1.0 | Host: {} | Uptime: {} ", host_name, uptime_str);
     
     let title = Paragraph::new(text)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD))
         .alignment(ratatui::layout::Alignment::Center)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(theme.border)));
     f.render_widget(title, area);
 }
 
@@ -188,20 +192,20 @@ fn draw_memory_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
             let bar = Line::from(vec![
                 Span::styled(" ".repeat(used_chars), Style::default().bg(theme.memory_chart)),
-                Span::styled(" ".repeat(cache_chars), Style::default().bg(Color::Cyan)),
-                Span::styled(" ".repeat(free_chars), Style::default().bg(Color::DarkGray)),
+                Span::styled(" ".repeat(cache_chars), Style::default().bg(theme.header_fg)),
+                Span::styled(" ".repeat(free_chars), Style::default().bg(theme.cpu_low)),
             ]);
             f.render_widget(Paragraph::new(bar), chunks[1]);
         }
 
         // Legend
         let legend = Line::from(vec![
-            Span::styled(" Used ", Style::default().fg(Color::Green)),
-            Span::styled(format!("({}) ", fmt_bytes(mem_usage - cache)), Style::default().fg(Color::Gray)),
-            Span::styled(" Cache ", Style::default().fg(Color::Cyan)),
-            Span::styled(format!("({}) ", fmt_bytes(cache)), Style::default().fg(Color::Gray)),
-            Span::styled(" Swap ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("({})", fmt_bytes(swap)), Style::default().fg(Color::Gray)),
+            Span::styled(" Used ", Style::default().fg(theme.running)),
+            Span::styled(format!("({}) ", fmt_bytes(mem_usage - cache)), Style::default().fg(theme.foreground)),
+            Span::styled(" Cache ", Style::default().fg(theme.header_fg)),
+            Span::styled(format!("({}) ", fmt_bytes(cache)), Style::default().fg(theme.foreground)),
+            Span::styled(" Swap ", Style::default().fg(theme.restarting)),
+            Span::styled(format!("({})", fmt_bytes(swap)), Style::default().fg(theme.foreground)),
         ]);
         f.render_widget(Paragraph::new(legend), chunks[2]);
     }
@@ -239,7 +243,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let sparkline_rx = Sparkline::default()
         .block(Block::default().title(format!("RX (Peak: {})", fmt_bytes(max_rx))).borders(Borders::NONE))
-        .style(Style::default().fg(Color::Blue))
+        .style(Style::default().fg(theme.network_rx))
         .data(&rx_data);
     f.render_widget(sparkline_rx, chunks[0]);
 
@@ -285,7 +289,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let aquarium_text: Vec<Line> = aquarium_lines.iter().enumerate().map(|(i, s)| {
         if i == 0 || i == 4 {
-            Line::from(Span::styled(s, Style::default().fg(Color::Blue)))
+            Line::from(Span::styled(s, Style::default().fg(theme.header_fg)))
         } else {
              // We need to color the fish differently than the background spaces
              // But for simplicity in this text widget, let's just color the whole line cyan for now
@@ -300,7 +304,7 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                  if c == '<' || c == '>' {
                      spans.push(Span::styled(c.to_string(), Style::default().fg(theme.network_rx)));
                  } else if c == 'o' {
-                     spans.push(Span::styled(c.to_string(), Style::default().fg(Color::White)));
+                     spans.push(Span::styled(c.to_string(), Style::default().fg(theme.foreground)));
                  } else {
                      spans.push(Span::raw(c.to_string()));
                  }
@@ -381,18 +385,18 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
     ];
 
     let actions_line = Line::from(vec![
-        Span::styled(" MANAGEMENT: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled("[C] Create ", Style::default().fg(Color::Gray)),
-        Span::styled("[E] Edit ", Style::default().fg(Color::Gray)),
-        Span::styled("[e] Shell ", Style::default().fg(Color::Gray)),
-        Span::styled("[B] Rebuild ", Style::default().fg(Color::Gray)),
-        Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-        Span::styled("ACTIONS: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled("[R] Restart ", Style::default().fg(Color::Gray)),
-        Span::styled("[S] Stop ", Style::default().fg(Color::Gray)),
-        Span::styled("[U] Start ", Style::default().fg(Color::Gray)),
-        Span::styled("[Del] Delete ", Style::default().fg(Color::Gray)),
-        Span::styled("[Enter] Details ", Style::default().fg(Color::Gray)),
+        Span::styled(" MANAGEMENT: ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
+        Span::styled("[C] Create ", Style::default().fg(theme.foreground)),
+        Span::styled("[E] Edit ", Style::default().fg(theme.foreground)),
+        Span::styled("[e] Shell ", Style::default().fg(theme.foreground)),
+        Span::styled("[B] Rebuild ", Style::default().fg(theme.foreground)),
+        Span::styled(" | ", Style::default().fg(theme.border)),
+        Span::styled("ACTIONS: ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
+        Span::styled("[R] Restart ", Style::default().fg(theme.foreground)),
+        Span::styled("[S] Stop ", Style::default().fg(theme.foreground)),
+        Span::styled("[U] Start ", Style::default().fg(theme.foreground)),
+        Span::styled("[Del] Delete ", Style::default().fg(theme.foreground)),
+        Span::styled("[Enter] Details ", Style::default().fg(theme.foreground)),
     ]);
 
     let table = Table::new(rows, widths)
@@ -401,7 +405,7 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
             .borders(Borders::ALL)
             .title(" CONTAINERS ")
             .title_bottom(actions_line)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().fg(theme.border))
         )
         .highlight_style(Style::default().bg(theme.selection_bg).fg(theme.selection_fg).add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
@@ -430,7 +434,7 @@ fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(theme.border))
         .title(" TOOLS ")
         .title(Title::from(" [Tab] Tools ").alignment(Alignment::Right).position(Position::Bottom));
     
@@ -469,13 +473,13 @@ fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .split(v_layout[1]);
             
         let p = Paragraph::new(globe.join("\n"))
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(theme.foreground));
         f.render_widget(p, h_layout[1]);
 
     }
 }
 
-fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _theme: &Theme) {
+fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, theme: &Theme) {
     let title = if matches!(wizard.step, crate::app::WizardStep::ModeSelection { .. }) {
         " TOOLS - WIZARD "
     } else {
@@ -485,7 +489,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::White))
+        .border_style(Style::default().fg(theme.border))
         .title(title);
     
     let inner = block.inner(area);
@@ -506,9 +510,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .enumerate()
                 .map(|(i, (title, desc))| {
                     let (title_style, desc_style) = if i == *selected_index {
-                        (Style::default().fg(Color::White).add_modifier(Modifier::BOLD), Style::default().fg(Color::Gray))
+                        (Style::default().fg(theme.selection_fg).bg(theme.selection_bg).add_modifier(Modifier::BOLD), Style::default().fg(theme.selection_fg).bg(theme.selection_bg))
                     } else {
-                        (Style::default().fg(Color::DarkGray), Style::default().fg(Color::DarkGray))
+                        (Style::default().fg(theme.foreground), Style::default().fg(theme.border))
                     };
                     
                     let content = vec![
@@ -521,11 +525,11 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .collect();
             
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" Select Operation ").border_style(Style::default().fg(Color::Gray)));
+                .block(Block::default().borders(Borders::ALL).title(" Select Operation ").border_style(Style::default().fg(theme.border)));
             f.render_widget(list, inner);
             
             let help_area = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-            let help = Paragraph::new("UP/DOWN: Navigate | ENTER: Select | ESC: Cancel").style(Style::default().fg(Color::DarkGray));
+            let help = Paragraph::new("UP/DOWN: Navigate | ENTER: Select | ESC: Cancel").style(Style::default().fg(theme.border));
             f.render_widget(help, help_area[1]);
         },
         crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id, port_status } => {
@@ -544,7 +548,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
             let fields = [
@@ -558,9 +562,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
 
             for (i, (label, value)) in fields.iter().enumerate() {
                 let style = if *focused_field == i {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.border)
                 };
                 let mut title_text = label.to_string();
                 if i == 2 { // Ports field
@@ -577,7 +581,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 f.render_widget(p, chunks[i+1]);
             }
             
-            let help = Paragraph::new("ENTER: Create/Update | TAB: Next Field").style(Style::default().fg(Color::DarkGray));
+            let help = Paragraph::new("ENTER: Create/Update | TAB: Next Field").style(Style::default().fg(theme.border));
             f.render_widget(help, chunks[7]);
         },
         crate::app::WizardStep::FileBrowser { current_path, list_state, items, mode } => {
@@ -625,18 +629,18 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                  let display_name = format!("{} {} {}", tree_prefix, icon, name);
                  
                  let style = if Some(i) == list_state.selected() {
-                     Style::default().fg(Color::White).bg(Color::DarkGray)
+                     Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                  } else {
-                     Style::default().fg(Color::Gray)
+                     Style::default().fg(theme.foreground)
                  };
                  
                  // Highlight Dockerfile
                  let final_style = if name == "Dockerfile" || name == "docker-compose.yml" {
-                      if Some(i) == list_state.selected() {
-                          style.add_modifier(Modifier::BOLD).fg(Color::Yellow)
-                      } else {
-                          style.add_modifier(Modifier::BOLD).fg(Color::Yellow)
-                      }
+                       if Some(i) == list_state.selected() {
+                           style.add_modifier(Modifier::BOLD).fg(theme.header_fg)
+                       } else {
+                           style.add_modifier(Modifier::BOLD).fg(theme.header_fg)
+                       }
                  } else {
                      style
                  };
@@ -654,7 +658,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                     .borders(Borders::ALL)
                     .title(format!("{} - {}", title, current_path.display()))
                     .title_bottom(instructions)
-                    .border_style(Style::default().fg(Color::Gray)));
+                    .border_style(Style::default().fg(theme.border)));
              
              let mut state = list_state.clone();
              f.render_stateful_widget(list, inner, &mut state);
@@ -672,26 +676,26 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
             let path_p = Paragraph::new(path.to_string_lossy())
-                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(theme.border)));
             f.render_widget(path_p, chunks[1]);
 
             let framework_style = if *focused_option == 0 {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
             } else if *detected_framework == crate::app::Framework::Manual {
-                Style::default().fg(Color::Red)
+                Style::default().fg(theme.stopped) // Red
             } else {
-                Style::default().fg(Color::Green)
+                Style::default().fg(theme.running) // Green
             };
             let framework_p = Paragraph::new(format!("{} ({})", detected_framework.display_name(), detected_version))
-                .block(Block::default().borders(Borders::ALL).title("Detected Framework").border_style(if *focused_option == 0 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) }))
+                .block(Block::default().borders(Borders::ALL).title("Detected Framework").border_style(if *focused_option == 0 { Style::default().fg(theme.selection_bg) } else { Style::default().fg(theme.border) }))
                 .style(framework_style);
             f.render_widget(framework_p, chunks[2]);
 
-            let port_style = if *editing_port || *focused_option == 1 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
+            let port_style = if *editing_port || *focused_option == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let mut port_title = "Port (Press 'p' to edit)".to_string();
             match port_status {
                 crate::app::PortStatus::Available => port_title.push_str(" [OK]"),
@@ -712,21 +716,21 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let options_items: Vec<ListItem> = options.iter().enumerate().map(|(i, op)| {
                 // Map button index 0 -> focused_option 2, index 1 -> focused_option 3
                 let style = if (i == 0 && *focused_option == 2) || (i == 1 && *focused_option == 3) {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(theme.foreground)
                 };
                 ListItem::new(*op).style(style)
             }).collect();
 
             let options_list = List::new(options_items)
-                .block(Block::default().borders(Borders::ALL).title("Actions").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Actions").border_style(Style::default().fg(theme.border)));
             f.render_widget(options_list, chunks[4]);
 
             if *manual_selection_open {
                 let area = centered_rect(60, 50, f.size());
                 f.render_widget(Clear, area);
-                let block = Block::default().title("Select Framework").borders(Borders::ALL).border_style(Style::default().fg(Color::White));
+                let block = Block::default().title("Select Framework").borders(Borders::ALL).border_style(Style::default().fg(theme.header_fg));
                 f.render_widget(block.clone(), area);
                 
                 let frameworks = [
@@ -742,9 +746,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 
                 let list_items: Vec<ListItem> = frameworks.iter().enumerate().map(|(i, fw)| {
                     let style = if i == *manual_selected_index {
-                        Style::default().fg(Color::Black).bg(Color::White)
+                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                     } else {
-                        Style::default().fg(Color::White)
+                        Style::default().fg(theme.foreground)
                     };
                     ListItem::new(fw.display_name()).style(style)
                 }).collect();
@@ -766,11 +770,11 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
             let path_p = Paragraph::new(path.to_string_lossy())
-                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(theme.border)));
             f.render_widget(path_p, chunks[1]);
 
             let options = vec![
@@ -779,11 +783,11 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             ];
             let options_text = options.join("\n");
             let options_p = Paragraph::new(options_text)
-                .block(Block::default().borders(Borders::ALL).title("Options").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Options").border_style(Style::default().fg(theme.border)));
             f.render_widget(options_p, chunks[2]);
 
             let help = Paragraph::new("G/ENTER: Generate | C/ESC: Cancel")
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
         crate::app::WizardStep::ComposeServiceSelection { path, selected_services, focused_index, all_services } => {
@@ -798,39 +802,39 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
             let path_p = Paragraph::new(path.to_string_lossy())
-                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Target Directory").border_style(Style::default().fg(theme.border)));
             f.render_widget(path_p, chunks[1]);
 
             let items: Vec<ListItem> = all_services.iter().enumerate().map(|(i, svc)| {
                 let is_selected = selected_services.contains(svc);
                 let check = if is_selected { "[x]" } else { "[ ]" };
                 let style = if i == *focused_index {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                    Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(theme.foreground)
                 };
                 ListItem::new(format!("{} {}", check, svc)).style(style)
             }).collect();
             
             // Add "Next" button at the end
             let next_style = if *focused_index == all_services.len() {
-                Style::default().fg(Color::Black).bg(Color::Green)
+                Style::default().fg(theme.running).bg(theme.background) // Greenish
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.foreground)
             };
             let mut all_items = items;
             all_items.push(ListItem::new("[ Next > ]").style(next_style));
 
             let list = List::new(all_items)
-                .block(Block::default().borders(Borders::ALL).title("Services Found").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Services Found").border_style(Style::default().fg(theme.border)));
             f.render_widget(list, chunks[2]);
 
             let help = Paragraph::new("SPACE: Toggle | UP/DOWN: Navigate | ENTER: Next | ESC: Back")
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
         crate::app::WizardStep::ResourceAllocation { path: _, services: _, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem, all_services: _ } => {
@@ -846,46 +850,46 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
-            let cpu_style = if *focused_field == 0 { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
+            let cpu_style = if *focused_field == 0 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let cpu_p = Paragraph::new(cpu_limit.as_str())
                 .block(Block::default().borders(Borders::ALL).title(format!("CPU Limit (Cores) - Detected: {}", detected_cpu)).border_style(cpu_style));
             f.render_widget(cpu_p, chunks[1]);
 
             let mem_gb = *detected_mem as f64 / (1024.0 * 1024.0 * 1024.0);
-            let mem_style = if *focused_field == 1 { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
+            let mem_style = if *focused_field == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let mem_p = Paragraph::new(mem_limit.as_str())
                 .block(Block::default().borders(Borders::ALL).title(format!("Memory Limit - Detected: {:.1} GB", mem_gb)).border_style(mem_style));
             f.render_widget(mem_p, chunks[2]);
 
             let info_text = vec![
                 Line::from(""),
-                Line::from(Span::styled("PRO TIP:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled("PRO TIP:", Style::default().fg(theme.restarting).add_modifier(Modifier::BOLD))),
                 Line::from("Leave empty or press [s] to allow DockTop to calculate"),
                 Line::from("optimal resources automatically based on your hardware."),
                 Line::from(""),
                 Line::from(if *focused_field == 2 {
-                    Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(Color::Black).bg(Color::Green))
+                    Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(theme.running).bg(theme.background))
                 } else {
-                    Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(Color::Gray))
+                    Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(theme.foreground))
                 }),
             ];
             let info_p = Paragraph::new(info_text)
-                .block(Block::default().borders(Borders::ALL).title("Info").border_style(Style::default().fg(Color::DarkGray)));
+                .block(Block::default().borders(Borders::ALL).title("Info").border_style(Style::default().fg(theme.border)));
             f.render_widget(info_p, chunks[3]);
 
             let help = Paragraph::new("UP/DOWN: Navigate | S: Auto-Calculate | ENTER: Next/Generate | ESC: Back")
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[4]);
         },
         crate::app::WizardStep::OverwriteConfirm { path, detected_framework: _, detected_version: _, port: _ } => {
              let block = Block::default()
                 .title(" ⚠️  WARNING: File Exists ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
-                .style(Style::default().bg(Color::Black));
+                .border_style(Style::default().fg(theme.stopped))
+                .style(Style::default().bg(theme.background));
             
             let area = centered_rect(50, 30, inner);
             f.render_widget(Clear, area);
@@ -894,7 +898,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
             let inner = block.inner(area);
             
             let text = vec![
-                Line::from(Span::styled("Dockerfile already exists!", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled("Dockerfile already exists!", Style::default().fg(theme.stopped).add_modifier(Modifier::BOLD))),
                 Line::from(""),
                 Line::from(format!("Target: {}/Dockerfile", path.display())),
                 Line::from(""),
@@ -902,9 +906,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 Line::from("The old file will be renamed to Dockerfile.bak"),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("[Y] Backup & Overwrite", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("[Y] Backup & Overwrite", Style::default().fg(theme.running).add_modifier(Modifier::BOLD)),
                     Span::raw("   "),
-                    Span::styled("[N] Cancel", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("[N] Cancel", Style::default().fg(theme.stopped).add_modifier(Modifier::BOLD)),
                 ]),
             ];
             
@@ -926,7 +930,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-            let title_p = Paragraph::new(title).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
             if *loading {
@@ -955,16 +959,16 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                     let content = format!("{} {} | {:<3} | {:<10} | {:<15} | {}", check, item.id.chars().take(12).collect::<String>(), kind_str, size_str, item.age, item.name);
                     
                     let style = if Some(i) == list_state.selected() {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                        Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.foreground)
                     };
                     ListItem::new(content).style(style)
                 }).collect();
 
                 let mut state = list_state.clone();
                 let list = List::new(list_items)
-                    .block(Block::default().borders(Borders::ALL).title("Junk Items").border_style(Style::default().fg(Color::DarkGray)));
+                    .block(Block::default().borders(Borders::ALL).title("Junk Items").border_style(Style::default().fg(theme.border)));
                 f.render_stateful_widget(list, chunks[1], &mut state);
 
                 // Summary
@@ -976,13 +980,13 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 };
 
                 let summary = Paragraph::new(format!("Potential Space Reclaimed: {}", total_str))
-                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Green)))
-                    .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.running)))
+                    .style(Style::default().fg(theme.running).add_modifier(Modifier::BOLD));
                 f.render_widget(summary, chunks[2]);
             }
 
             let help = Paragraph::new("SPACE: Toggle | UP/DOWN: Navigate | ENTER: Clean Selected | ESC: Cancel")
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC));
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
         crate::app::WizardStep::BuildConf { tag, mount_volume, focused_field, .. } => {
@@ -991,26 +995,26 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)])
                 .split(inner);
             
-            let tag_style = if *focused_field == 0 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
+            let tag_style = if *focused_field == 0 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let p = Paragraph::new(tag.as_str()).block(Block::default().borders(Borders::ALL).title("Image Tag").border_style(tag_style));
             f.render_widget(p, layout[0]);
 
-            let border_style = if *focused_field == 1 { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
+            let border_style = if *focused_field == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let check = if *mount_volume { "[x]" } else { "[ ]" };
             let block = Block::default().borders(Borders::ALL).border_style(border_style).title("Options");
             let p = Paragraph::new(format!("{} Mount current folder for live-reload?", check)).block(block);
             f.render_widget(p, layout[1]);
 
             let help = Paragraph::new("ENTER: Build | SPACE: Toggle | ESC: Cancel")
-                .style(Style::default().fg(Color::DarkGray));
+                .style(Style::default().fg(theme.border));
             f.render_widget(help, layout[2]);
         },
         crate::app::WizardStep::Processing { message, .. } => {
             let text = vec![
                 Line::from(""),
-                Line::from(Span::styled(message, Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(message, Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD))),
                 Line::from(""),
-                Line::from(Span::styled("Please wait...", Style::default().fg(Color::Gray))),
+                Line::from(Span::styled("Please wait...", Style::default().fg(theme.border))),
             ];
             let p = Paragraph::new(text)
                 .alignment(ratatui::layout::Alignment::Center)
@@ -1019,10 +1023,10 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
         },
         crate::app::WizardStep::Error(msg) => {
              let text = vec![
-                Line::from(Span::styled("Error:", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))),
-                Line::from(Span::styled(msg, Style::default().fg(Color::White))),
+                Line::from(Span::styled("Error:", Style::default().fg(theme.stopped).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(msg, Style::default().fg(theme.foreground))),
                 Line::from(""),
-                Line::from(Span::styled("Press Esc to close", Style::default().fg(Color::Gray))),
+                Line::from(Span::styled("Press Esc to close", Style::default().fg(theme.border))),
             ];
             let p = Paragraph::new(text).wrap(Wrap { trim: true });
             f.render_widget(p, inner);
@@ -1039,7 +1043,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
                 ])
                 .split(inner);
 
-             let style = |idx| if *focused_field == idx { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::Gray) };
+             let style = |idx| if *focused_field == idx { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
              
              // Theme Selection
              let p = Paragraph::new(format!("< {} > (Left/Right)", temp_config.general.theme))
@@ -1065,7 +1069,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
 
              // Help
              let help = Paragraph::new("[S] Save & Apply | [R] Reset | [Esc] Cancel")
-                .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD))
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::BOLD))
                 .alignment(Alignment::Center);
              f.render_widget(help, layout[4]);
         },
@@ -1073,27 +1077,27 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, _the
     }
 }
 
-fn draw_logs_section(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
+fn draw_logs_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(" LOGS ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(theme.border));
     
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     let mut lines = vec![];
     if app.is_loading_details {
-        lines.push(Line::from(Span::styled(" Loading logs...", Style::default().fg(Color::Gray))));
+        lines.push(Line::from(Span::styled(" Loading logs...", Style::default().fg(theme.border))));
     } else {
         for log in &app.logs {
             let style = if log.contains("ERROR") || log.contains("ERR") {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.stopped).add_modifier(Modifier::BOLD)
             } else if log.contains("WARN") {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.restarting)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.foreground)
             };
             lines.push(Line::from(Span::styled(log, style)));
         }
@@ -1103,16 +1107,16 @@ fn draw_logs_section(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
     f.render_widget(paragraph, inner_area);
 }
 
-fn draw_footer(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
+fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let status_text = if let Some((msg, _)) = &app.action_status {
-        Span::styled(format!(" {} ", msg), Style::default().bg(Color::White).fg(Color::Black))
+        Span::styled(format!(" {} ", msg), Style::default().bg(theme.foreground).fg(theme.background))
     } else {
         Span::raw("")
     };
 
     let keys = Span::styled(
         " j/k: Nav • q: Quit",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.border),
     );
 
     let layout = Layout::default()
@@ -1142,12 +1146,12 @@ pub fn calculate_cpu_usage(stats: &ContainerStats, prev_stats: &Option<Container
     }
 }
 
-fn draw_details_popup(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
+fn draw_details_popup(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .title(" Container Details ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(theme.background));
     
     let area = centered_rect(60, 60, area);
     f.render_widget(Clear, area);
@@ -1158,13 +1162,13 @@ fn draw_details_popup(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
     if let Some(inspect) = &app.current_inspection {
         let mut lines = Vec::new();
         
-        lines.push(Line::from(vec![Span::styled("ID: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.id.as_str())]));
-        lines.push(Line::from(vec![Span::styled("Name: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.name.as_deref().unwrap_or("?"))]));
-        lines.push(Line::from(vec![Span::styled("Image: ", Style::default().fg(Color::Cyan)), Span::raw(inspect.config.as_ref().map(|c| c.image.as_str()).unwrap_or("?"))]));
+        lines.push(Line::from(vec![Span::styled("ID: ", Style::default().fg(theme.header_fg)), Span::raw(inspect.id.as_str())]));
+        lines.push(Line::from(vec![Span::styled("Name: ", Style::default().fg(theme.header_fg)), Span::raw(inspect.name.as_deref().unwrap_or("?"))]));
+        lines.push(Line::from(vec![Span::styled("Image: ", Style::default().fg(theme.header_fg)), Span::raw(inspect.config.as_ref().map(|c| c.image.as_str()).unwrap_or("?"))]));
         lines.push(Line::from(""));
 
         // Network
-        lines.push(Line::from(Span::styled("Network:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled("Network:", Style::default().fg(theme.restarting).add_modifier(Modifier::BOLD))));
         if let Some(net) = &inspect.network_settings {
              if let Some(networks) = &net.networks {
                  for (name, settings) in networks {
@@ -1186,7 +1190,7 @@ fn draw_details_popup(f: &mut Frame, app: &App, area: Rect, _theme: &Theme) {
         lines.push(Line::from(""));
 
         // Env Vars
-        lines.push(Line::from(Span::styled("Environment Variables:", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled("Environment Variables:", Style::default().fg(theme.restarting).add_modifier(Modifier::BOLD))));
         if let Some(config) = &inspect.config {
             if let Some(env) = &config.env {
                 for e in env {
