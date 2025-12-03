@@ -71,6 +71,49 @@ fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBa
     Ok(())
 }
 
+fn enter_database_cli(container_id: &str, image: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cli_path: &str) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+
+    println!("Entering database CLI for {} ({}) ...", container_id, image);
+
+    let mut cmd = std::process::Command::new(cli_path);
+    cmd.arg("exec").arg("-it").arg(container_id);
+
+    let image_lower = image.to_lowercase();
+    if image_lower.contains("mysql") || image_lower.contains("mariadb") {
+        cmd.arg("mysql").arg("-u").arg("root").arg("-p");
+    } else if image_lower.contains("postgres") {
+        cmd.arg("psql").arg("-U").arg("postgres");
+    } else if image_lower.contains("redis") {
+        cmd.arg("redis-cli");
+    } else if image_lower.contains("mongo") {
+        cmd.arg("mongosh");
+    } else {
+        println!("Unknown database type for image: {}", image);
+        println!("Press any key to continue...");
+        let _ = std::io::stdin().read_line(&mut String::new());
+        
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        terminal.clear()?;
+        return Ok(());
+    }
+
+    let status = cmd.status();
+
+    if status.is_err() || !status.unwrap().success() {
+         println!("Failed to start database CLI.");
+         println!("Press any key to continue...");
+         let _ = std::io::stdin().read_line(&mut String::new());
+    }
+
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Setup Terminal
@@ -771,6 +814,17 @@ async fn main() -> Result<()> {
                         let cli_path = app.config.general.docker_cli_path.clone();
                         let _ = enter_container_shell(&id, &mut terminal, &cli_path);
                         terminal.clear()?;
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if let Some(container) = app.get_selected_container() {
+                        let image = container.image.to_lowercase();
+                        if image.contains("mysql") || image.contains("mariadb") || image.contains("postgres") || image.contains("redis") || image.contains("mongo") {
+                            let id = container.id.clone();
+                            let cli_path = app.config.general.docker_cli_path.clone();
+                            let _ = enter_database_cli(&id, &container.image, &mut terminal, &cli_path);
+                            terminal.clear()?;
+                        }
                     }
                 }
                                 KeyCode::Char('b') => {

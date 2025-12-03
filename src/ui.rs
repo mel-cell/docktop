@@ -384,12 +384,22 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
         Constraint::Percentage(30),
     ];
 
-    let actions_line = Line::from(vec![
+    let mut actions_spans = vec![
         Span::styled(" MANAGEMENT: ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
         Span::styled("[C] Create ", Style::default().fg(theme.foreground)),
         Span::styled("[E] Edit ", Style::default().fg(theme.foreground)),
         Span::styled("[e] Shell ", Style::default().fg(theme.foreground)),
         Span::styled("[B] Rebuild ", Style::default().fg(theme.foreground)),
+    ];
+
+    if let Some(c) = app.get_selected_container() {
+        let image = c.image.to_lowercase();
+        if image.contains("mysql") || image.contains("mariadb") || image.contains("postgres") || image.contains("redis") || image.contains("mongo") {
+             actions_spans.push(Span::styled("[d] DB CLI ", Style::default().fg(theme.running)));
+        }
+    }
+
+    actions_spans.extend(vec![
         Span::styled(" | ", Style::default().fg(theme.border)),
         Span::styled("ACTIONS: ", Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)),
         Span::styled("[R] Restart ", Style::default().fg(theme.foreground)),
@@ -398,6 +408,8 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
         Span::styled("[Del] Delete ", Style::default().fg(theme.foreground)),
         Span::styled("[Enter] Details ", Style::default().fg(theme.foreground)),
     ]);
+
+    let actions_line = Line::from(actions_spans);
 
     let table = Table::new(rows, widths)
         .header(header)
