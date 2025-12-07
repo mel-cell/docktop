@@ -6,65 +6,56 @@ set -e
 
 echo "Installing DockTop..."
 
-# Check for Rust
-if ! command -v cargo &> /dev/null; then
-    echo "Rust is not installed. Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source $HOME/.cargo/env
-else
-    echo "Rust is already installed."
-fi
+# Install Binary
+INSTALL_DIR="/usr/local/bin"
+BINARY_NAME="docktop"
+REPO="mel-cell/docktop"
 
-# Check for Docker
-if ! command -v docker &> /dev/null; then
-    echo "WARNING: Docker is not installed. DockTop requires Docker to function correctly."
-    echo "Please install Docker manually for your distribution."
-else
-    echo "Docker is installed."
-fi
-
-# Check and Install Nerd Fonts
-FONT_DIR="$HOME/.local/share/fonts"
-FONT_NAME="JetBrainsMonoNerdFont"
-
-if [ ! -d "$FONT_DIR" ]; then
-    mkdir -p "$FONT_DIR"
-fi
-
-if ! ls "$FONT_DIR" | grep -q "JetBrainsMono"; then
-    echo "Installing Nerd Fonts (JetBrainsMono) for icons..."
-    # Download font
-    mkdir -p /tmp/nerdfonts
-    curl -fLo "/tmp/nerdfonts/JetBrainsMono.zip" https://github.com/ryanoasis/nerd-fonts/releases/download/v3.1.1/JetBrainsMono.zip
-    
-    # Unzip and install
-    unzip -o "/tmp/nerdfonts/JetBrainsMono.zip" -d "$FONT_DIR"
-    
-    # Clean up
-    rm -rf /tmp/nerdfonts
-    
-    # Update font cache
-    if command -v fc-cache &> /dev/null; then
-        echo "Updating font cache..."
-        fc-cache -f -v > /dev/null
+install_binary() {
+    local src=$1
+    echo "Installing binary to $INSTALL_DIR/$BINARY_NAME..."
+    if [ -w "$INSTALL_DIR" ]; then
+        cp "$src" "$INSTALL_DIR/$BINARY_NAME"
+    else
+        echo "Sudo permissions required to install to $INSTALL_DIR"
+        sudo cp "$src" "$INSTALL_DIR/$BINARY_NAME"
     fi
-    
-    echo "Nerd Fonts installed! Please configure your terminal to use 'JetBrainsMono Nerd Font'."
+    sudo chmod +x "$INSTALL_DIR/$BINARY_NAME"
+}
+
+# Try to download from GitHub Releases first
+echo "Attempting to download latest release from GitHub..."
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+
+if [ "$OS" == "linux" ] && [ "$ARCH" == "x86_64" ]; then
+    DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/docktop-linux-amd64"
+    if curl -L --fail "$DOWNLOAD_URL" -o /tmp/docktop_latest; then
+        echo "Download successful!"
+        install_binary /tmp/docktop_latest
+        rm /tmp/docktop_latest
+        INSTALLED=true
+    else
+        echo "Failed to download release. Falling back to build from source."
+    fi
 else
-    echo "Nerd Fonts seems to be installed."
+    echo "Pre-built binary not available for $OS-$ARCH. Falling back to build from source."
 fi
 
-# Build the project
-echo "Building DockTop (Release)..."
-cargo build --release
+if [ "$INSTALLED" != "true" ]; then
+    # Check for Rust
+    if ! command -v cargo &> /dev/null; then
+        echo "Rust is not installed. Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source $HOME/.cargo/env
+    else
+        echo "Rust is already installed."
+    fi
 
-# Install binary
-echo "Installing binary to /usr/local/bin/docktop..."
-if [ -w /usr/local/bin ]; then
-    cp target/release/docktop /usr/local/bin/docktop
-else
-    echo "Sudo permissions required to install to /usr/local/bin"
-    sudo cp target/release/docktop /usr/local/bin/docktop
+    # Build the project
+    echo "Building DockTop (Release)..."
+    cargo build --release
+    install_binary target/release/docktop
 fi
 
 echo "DockTop installed successfully!"
