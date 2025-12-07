@@ -92,6 +92,7 @@ docktop
 
 - `↑/↓` or `j/k` - Navigate containers
 - `Tab` - Switch between sections / Open Tools Menu
+- `?` - Open Help / Shortcuts Menu
 - `q` or `Ctrl+C` - Quit application
 
 #### Container Actions
@@ -101,14 +102,29 @@ docktop
 - `t` - Stop container
 - `r` - Restart container
 - `d` - Remove container
+- `y` - Edit container config (YAML)
 - `l` - View logs
 - `F5` - Force refresh container list
 
 #### Tools & Wizards
 
-- `?` or `Tab` - Open wizard menu
+- `Tab` - Open wizard menu
 - `Esc` - Cancel/Go back
 - `Enter` - Confirm selection
+- `Ctrl+A` - Toggle Advanced Options (in Wizard)
+- `Space` - Cycle options (e.g., Restart Policy in Wizard)
+
+---
+
+## 🔄 Self-Update
+
+DockTop comes with a built-in self-update mechanism. To update to the latest version:
+
+```bash
+docktop update
+```
+
+This command will check for the latest release on GitHub, download the binary, and replace the current installation.
 
 ---
 
