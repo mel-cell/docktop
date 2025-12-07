@@ -25,6 +25,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
