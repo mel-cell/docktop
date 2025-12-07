@@ -22,7 +22,19 @@ use action::Action;
 use app::App;
 use docker::{Container, ContainerStats, ContainerInspection, DockerClient};
 
-
+fn update_docktop() -> Result<(), Box<dyn std::error::Error>> {
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("mel-cell")
+        .repo_name("docktop")
+        .bin_name("docktop")
+        .show_download_progress(true)
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .build()?
+        .update()?;
+    
+    println!("Update status: `{}`!", status.version());
+    Ok(())
+}
 
 fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cli_path: &str) -> io::Result<()> {
     disable_raw_mode()?;
@@ -100,6 +112,17 @@ fn enter_database_cli(container_id: &str, image: &str, terminal: &mut Terminal<C
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Check for update arg
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "update" {
+        if let Err(e) = update_docktop() {
+            eprintln!("Update failed: {}", e);
+            std::process::exit(1);
+        }
+        println!("Update successful! Please restart docktop.");
+        std::process::exit(0);
+    }
+
     // Setup Terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
