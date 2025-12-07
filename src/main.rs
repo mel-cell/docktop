@@ -8,37 +8,21 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use tokio::sync::{mpsc, watch};
 use tokio::io::AsyncReadExt;
-use bollard::Docker;
-use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions, ListImagesOptions, ListVolumesOptions, ListContainersOptions, RemoveImageOptions, RemoveVolumeOptions};
-use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
-use futures_util::stream::StreamExt;
-use http_body_util::Full;
-use http_body_util::Either;
-use bytes::Bytes;
+// Removed unused imports
 
 mod app;
 mod config;
 mod docker;
 mod ui;
 mod theme;
+mod action;
+
+use action::Action;
 
 use app::App;
 use docker::{Container, ContainerStats, ContainerInspection, DockerClient};
 
-#[derive(Debug)]
-enum Action {
-    Start(String),
-    Stop(String),
-    Restart(String),
-    Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String },
-    Build { tag: String, path: std::path::PathBuf, mount: bool },
-    ComposeUp { path: std::path::PathBuf, override_path: Option<std::path::PathBuf> },
-    Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
-    ScanJanitor,
-    CleanJanitor(Vec<app::JanitorItem>),
-    Delete(String),
-    RefreshContainers,
-}
+
 
 fn enter_container_shell(container_id: &str, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cli_path: &str) -> io::Result<()> {
     disable_raw_mode()?;
@@ -128,7 +112,7 @@ async fn main() -> Result<()> {
     let (tx_details, mut rx_details) = mpsc::channel::<(Option<ContainerStats>, Option<ContainerInspection>)>(10);
     let (tx_logs, mut rx_logs) = mpsc::channel::<String>(100);
     let (tx_target, rx_target) = watch::channel::<Option<String>>(None);
-    let (tx_action, mut rx_action) = mpsc::channel::<Action>(10);
+    let (tx_action, rx_action) = mpsc::channel::<Action>(10);
     let (tx_action_result, mut rx_action_result) = mpsc::channel::<String>(10);
     let (tx_janitor_items, mut rx_janitor_items) = mpsc::channel::<Vec<app::JanitorItem>>(10);
     let (tx_refresh, mut rx_refresh) = mpsc::channel::<()>(1);
@@ -283,375 +267,7 @@ async fn main() -> Result<()> {
     });
 
     // Task 5: Action Executor
-    let tx_refresh_action = tx_refresh.clone();
-    tokio::spawn(async move {
-        let docker = Docker::connect_with_local_defaults().unwrap();
-        while let Some(action) = rx_action.recv().await {
-            let res = match action {
-                Action::RefreshContainers => {
-                    let _ = tx_refresh_action.send(()).await;
-                    "Refreshed containers".to_string()
-                },
-                Action::ScanJanitor => {
-                    let _ = tx_action_result.send("Scanning for junk...".to_string()).await;
-                    let mut items = Vec::new();
-                    
-                    // 1. Dangling Images
-                    let mut filters = std::collections::HashMap::new();
-                    filters.insert("dangling".to_string(), vec!["true".to_string()]);
-                    
-                    if let Ok(images) = docker.list_images(Some(ListImagesOptions {
-                        filters: Some(filters),
-                        ..Default::default()
-                    })).await {
-                        for img in images {
-                            items.push(app::JanitorItem {
-                                id: img.id.clone(),
-                                name: "<none>".to_string(),
-                                kind: app::JanitorItemKind::Image,
-                                size: img.size as u64,
-                                age: "Unknown".to_string(),
-                                selected: true,
-                            });
-                        }
-                    }
-
-                    // 2. Unused Volumes
-                    let mut filters = std::collections::HashMap::new();
-                    filters.insert("dangling".to_string(), vec!["true".to_string()]);
-
-                    if let Ok(volumes) = docker.list_volumes(Some(ListVolumesOptions {
-                        filters: Some(filters),
-                    })).await {
-                        if let Some(vols) = volumes.volumes {
-                            for vol in vols {
-                                items.push(app::JanitorItem {
-                                    id: vol.name.clone(),
-                                    name: vol.name.clone(),
-                                    kind: app::JanitorItemKind::Volume,
-                                    size: 0,
-                                    age: "-".to_string(),
-                                    selected: false,
-                                });
-                            }
-                        }
-                    }
-
-                    // 3. Stopped Containers
-                    let mut filters = std::collections::HashMap::new();
-                    filters.insert("status".to_string(), vec!["exited".to_string(), "dead".to_string()]);
-
-                    if let Ok(containers) = docker.list_containers(Some(ListContainersOptions {
-                        all: true,
-                        filters: Some(filters),
-                        ..Default::default()
-                    })).await {
-                        for c in containers {
-                            items.push(app::JanitorItem {
-                                id: c.id.unwrap_or_default(),
-                                name: c.names.unwrap_or_default().first().cloned().unwrap_or_default(),
-                                kind: app::JanitorItemKind::Container,
-                                size: 0, // Container size requires size=true in list which is slow
-                                age: c.status.unwrap_or_default(),
-                                selected: true,
-                            });
-                        }
-                    }
-                    
-                    let _ = tx_janitor_items.send(items).await;
-                    "Scan Complete".to_string()
-                }
-                Action::CleanJanitor(items) => {
-                    let mut count = 0;
-                    for item in items {
-                        match item.kind {
-                            app::JanitorItemKind::Image => {
-                                let _ = docker.remove_image(&item.id, None::<RemoveImageOptions>, None).await;
-                            },
-                            app::JanitorItemKind::Volume => {
-                                let _ = docker.remove_volume(&item.id, None::<RemoveVolumeOptions>).await;
-                            },
-                            app::JanitorItemKind::Container => {
-                                let _ = docker.remove_container(&item.id, None::<RemoveContainerOptions>).await;
-                            },
-                        }
-                        count += 1;
-                        if count % 5 == 0 {
-                             let _ = tx_action_result.send(format!("Cleaned {} items...", count)).await;
-                        }
-                    }
-                    format!("Janitor finished. Removed {} items.", count)
-                }
-                Action::Start(id) => {
-                    match docker.start_container(&id, None::<StartContainerOptions>).await {
-                        Ok(_) => format!("Started container {}", &id[..12]),
-                        Err(e) => format!("Failed to start: {}", e),
-                    }
-                }
-                Action::Stop(id) => {
-                    match docker.stop_container(&id, None::<StopContainerOptions>).await {
-                        Ok(_) => format!("Stopped container {}", &id[..12]),
-                        Err(e) => format!("Failed to stop: {}", e),
-                    }
-                }
-                Action::Restart(id) => {
-                    match docker.restart_container(&id, None::<RestartContainerOptions>).await {
-                        Ok(_) => format!("Restarted container {}", &id[..12]),
-                        Err(e) => format!("Failed to restart: {}", e),
-                    }
-                }
-                Action::Create { image, name, ports, env, cpu, memory } => {
-                    let _ = tx_action_result.send(format!("Pulling {}...", image)).await;
-                    let mut stream = docker.create_image(
-                        Some(CreateImageOptions { from_image: Some(image.clone()), ..Default::default() }),
-                        None,
-                        None
-                    );
-                    while let Some(_) = stream.next().await {}
-
-                    let _ = tx_action_result.send(format!("Creating {}...", name)).await;
-                    
-                    let mut port_bindings = std::collections::HashMap::new();
-                    let mut exposed_ports = std::collections::HashMap::new();
-                    if !ports.is_empty() {
-                         let parts: Vec<&str> = ports.split(':').collect();
-                         if parts.len() == 2 {
-                             let container_port = format!("{}/tcp", parts[1]);
-                             exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
-                             port_bindings.insert(container_port, Some(vec![PortBinding {
-                                 host_ip: Some("0.0.0.0".to_string()),
-                                 host_port: Some(parts[0].to_string()),
-                             }]));
-                         }
-                    }
-
-                    let nano_cpus = if !cpu.is_empty() {
-                        cpu.parse::<f64>().ok().map(|v| (v * 1_000_000_000.0) as i64)
-                    } else { None };
-
-                    let memory_bytes = if !memory.is_empty() {
-                        let lower = memory.to_lowercase();
-                        if let Some(val) = lower.strip_suffix('m') {
-                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024)
-                        } else if let Some(val) = lower.strip_suffix('g') {
-                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
-                        } else if let Some(val) = lower.strip_suffix('k') {
-                            val.parse::<i64>().ok().map(|v| v * 1024)
-                        } else {
-                            lower.parse::<i64>().ok()
-                        }
-                    } else { None };
-
-                    let envs = if !env.is_empty() { Some(vec![env]) } else { None };
-                    
-                    let config = ContainerCreateBody {
-                        image: Some(image.clone()),
-                        exposed_ports: Some(exposed_ports),
-                        host_config: Some(HostConfig {
-                            port_bindings: Some(port_bindings),
-                            nano_cpus,
-                            memory: memory_bytes,
-                            ..Default::default()
-                        }),
-                        env: envs,
-                        ..Default::default()
-                    };
-
-                    let options = if !name.is_empty() {
-                        Some(CreateContainerOptions { name: Some(name.clone()), ..Default::default() })
-                    } else { None };
-
-                    match docker.create_container(options, config).await {
-                        Ok(res) => {
-                            let _ = tx_action_result.send(format!("Starting {}...", res.id)).await;
-                            match docker.start_container(&res.id, None::<StartContainerOptions>).await {
-                                Ok(_) => format!("Started new container {}", &res.id[..12]),
-                                Err(e) => format!("Failed to start: {}", e),
-                            }
-                        },
-                        Err(e) => format!("Failed to create: {}", e),
-                    }
-                }
-                Action::Build { tag, path, mount } => {
-                     let _ = tx_action_result.send(format!("Building {}...", tag)).await;
-                     
-                     let mut tar = tar::Builder::new(Vec::new());
-                     if let Err(e) = tar.append_dir_all(".", &path) {
-                         format!("Failed to pack context: {}", e)
-                     } else {
-                         let tar_content = tar.into_inner().unwrap();
-                         let build_options = BuildImageOptions {
-                             t: Some(tag.clone()),
-                             rm: true,
-                             ..Default::default()
-                         };
-                         
-                         let body = Full::new(Bytes::from(tar_content));
-                         let mut stream = docker.build_image(build_options, None, Some(Either::Left(body)));
-                         while let Some(_) = stream.next().await {}
-                         
-                         // Run
-                         let _ = tx_action_result.send(format!("Running {}...", tag)).await;
-                         let mut host_config = HostConfig::default();
-                         if mount {
-                             if let Ok(abs_path) = std::fs::canonicalize(&path) {
-                                 host_config.binds = Some(vec![format!("{}:/app", abs_path.to_string_lossy())]);
-                             }
-                         }
-
-                         let config = ContainerCreateBody {
-                             image: Some(tag.clone()),
-                             host_config: Some(host_config),
-                             ..Default::default()
-                         };
-                         
-                         match docker.create_container(None::<CreateContainerOptions>, config).await {
-                             Ok(res) => {
-                                 match docker.start_container(&res.id, None::<StartContainerOptions>).await {
-                                     Ok(_) => format!("Built and started {}", &res.id[..12]),
-                                     Err(e) => format!("Failed to start: {}", e),
-                                 }
-                             },
-                             Err(e) => format!("Failed to create: {}", e),
-                         }
-                     }
-                }
-                Action::ComposeUp { path, override_path } => {
-                    let _ = tx_action_result.send("Running docker compose up...".to_string()).await;
-                    
-                    let (work_dir, main_file) = if path.is_file() {
-                        (path.parent().unwrap_or(&path).to_path_buf(), path.file_name().unwrap().to_string_lossy().to_string())
-                    } else {
-                        (path.clone(), "docker-compose.yml".to_string())
-                    };
-
-                    let mut cmd = std::process::Command::new("docker");
-                    cmd.arg("compose")
-                       .arg("-f")
-                       .arg(&main_file);
-                    
-                    if let Some(ref ovr) = override_path {
-                        if let Some(ovr_name) = ovr.file_name() {
-                            cmd.arg("-f").arg(ovr_name);
-                        }
-                    }
-
-                    cmd.arg("up")
-                       .arg("-d")
-                       .current_dir(&work_dir);
-
-                    let output = cmd.output();
-                        
-                    match output {
-                        Ok(o) => {
-                            // Cleanup override file
-                            if let Some(ovr) = override_path {
-                                let _ = std::fs::remove_file(ovr);
-                            }
-
-                            if o.status.success() {
-                                "Compose Up Successful".to_string()
-                            } else {
-                                format!("Compose Failed: {}", String::from_utf8_lossy(&o.stderr))
-                            }
-                        },
-                        Err(e) => {
-                             // Cleanup override file
-                            if let Some(ovr) = override_path {
-                                let _ = std::fs::remove_file(ovr);
-                            }
-                            format!("Failed to run compose: {}", e)
-                        },
-                    }
-                }
-                Action::Replace { old_id, image, name, ports, env, cpu, memory } => {
-                     let _ = tx_action_result.send(format!("Stopping {}...", old_id)).await;
-                     let _ = docker.stop_container(&old_id, None::<StopContainerOptions>).await;
-                     let _ = tx_action_result.send(format!("Removing {}...", old_id)).await;
-                     let _ = docker.remove_container(&old_id, None::<RemoveContainerOptions>).await;
-                     
-                    let _ = tx_action_result.send(format!("Pulling {}...", image)).await;
-                    let mut stream = docker.create_image(
-                        Some(CreateImageOptions { from_image: Some(image.clone()), ..Default::default() }),
-                        None,
-                        None
-                    );
-                    while let Some(_) = stream.next().await {}
-
-                    let _ = tx_action_result.send(format!("Creating {}...", name)).await;
-                    
-                    let mut port_bindings = std::collections::HashMap::new();
-                    let mut exposed_ports = std::collections::HashMap::new();
-                    if !ports.is_empty() {
-                         let parts: Vec<&str> = ports.split(':').collect();
-                         if parts.len() == 2 {
-                             let container_port = format!("{}/tcp", parts[1]);
-                             exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
-                             port_bindings.insert(container_port, Some(vec![PortBinding {
-                                 host_ip: Some("0.0.0.0".to_string()),
-                                 host_port: Some(parts[0].to_string()),
-                             }]));
-                         }
-                    }
-
-                    let nano_cpus = if !cpu.is_empty() {
-                        cpu.parse::<f64>().ok().map(|v| (v * 1_000_000_000.0) as i64)
-                    } else { None };
-
-                    let memory_bytes = if !memory.is_empty() {
-                        let lower = memory.to_lowercase();
-                        if let Some(val) = lower.strip_suffix('m') {
-                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024)
-                        } else if let Some(val) = lower.strip_suffix('g') {
-                            val.parse::<i64>().ok().map(|v| v * 1024 * 1024 * 1024)
-                        } else if let Some(val) = lower.strip_suffix('k') {
-                            val.parse::<i64>().ok().map(|v| v * 1024)
-                        } else {
-                            lower.parse::<i64>().ok()
-                        }
-                    } else { None };
-
-                    let envs = if !env.is_empty() { Some(vec![env]) } else { None };
-                    
-                    let config = ContainerCreateBody {
-                        image: Some(image.clone()),
-                        exposed_ports: Some(exposed_ports),
-                        host_config: Some(HostConfig {
-                            port_bindings: Some(port_bindings),
-                            nano_cpus,
-                            memory: memory_bytes,
-                            ..Default::default()
-                        }),
-                        env: envs,
-                        ..Default::default()
-                    };
-
-                    let options = if !name.is_empty() {
-                        Some(CreateContainerOptions { name: Some(name.clone()), ..Default::default() })
-                    } else { None };
-
-                    match docker.create_container(options, config).await {
-                        Ok(res) => {
-                            let _ = tx_action_result.send(format!("Starting {}...", res.id)).await;
-                            match docker.start_container(&res.id, None::<StartContainerOptions>).await {
-                                Ok(_) => format!("Replaced container {}", &res.id[..12]),
-                                Err(e) => format!("Failed to start: {}", e),
-                            }
-                        },
-                        Err(e) => format!("Failed to create: {}", e),
-                    }
-                }
-                Action::Delete(id) => {
-                    let _ = tx_action_result.send(format!("Removing {}...", id)).await;
-                    match docker.remove_container(&id, Some(RemoveContainerOptions { force: true, ..Default::default() })).await {
-                        Ok(_) => format!("Removed container {}", &id[..12]),
-                        Err(e) => format!("Failed to remove: {}", e),
-                    }
-                }
-            };
-            let _ = tx_action_result.send(res).await;
-        }
-    });
+    tokio::spawn(action::run_action_loop(rx_action, tx_action_result, tx_janitor_items, tx_refresh));
 
     // App State
     let mut app = App::new();
@@ -694,21 +310,29 @@ async fn main() -> Result<()> {
                     }
                 }
                 KeyCode::Esc => {
-                    if app.wizard.is_some() {
+                    if app.show_help {
+                        app.show_help = false;
+                    } else if app.wizard.is_some() {
                         app.toggle_wizard();
                     }
                 }
+                KeyCode::Char('?') => {
+                    app.show_help = !app.show_help;
+                }
                     _ => {
-                        if app.wizard.is_some() {
-                                if let Some(wizard_action) = app.wizard_handle_key(key.code) {
+                        if app.show_help {
+                            // Ignore other keys when help is shown, except maybe q to close?
+                            // Let's just let ? or Esc close it.
+                        } else if app.wizard.is_some() {
+                                if let Some(wizard_action) = app.wizard_handle_key(key) {
                                     if let app::WizardAction::Close = wizard_action {
                                         app.wizard = None;
                                     } else {
                                         let action = match wizard_action {
-                                            app::WizardAction::Create { image, name, ports, env, cpu, memory } => Action::Create { image, name, ports, env, cpu, memory },
+                                            app::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
                                             app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
                                             app::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
-                                            app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory } => Action::Replace { old_id, image, name, ports, env, cpu, memory },
+                                            app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
                                             app::WizardAction::ScanJanitor => Action::ScanJanitor,
                                             app::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
                                             app::WizardAction::Close => unreachable!(),
@@ -791,6 +415,13 @@ async fn main() -> Result<()> {
                                                     }
                                                 }
                                             }
+                                            
+                                            let mut restart = String::new();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(policy) = &host_config.restart_policy {
+                                                    restart = policy.name.clone();
+                                                }
+                                            }
 
                                             app.wizard = Some(app::WizardState {
                                                 step: app::WizardStep::QuickRunInput {
@@ -800,6 +431,8 @@ async fn main() -> Result<()> {
                                                     env,
                                                     cpu,
                                                     memory,
+                                                    restart,
+                                                    show_advanced: false,
                                                     focused_field: 0,
                                                     editing_id: Some(c.id.clone()),
                                                     port_status: app::PortStatus::None,
@@ -881,6 +514,13 @@ async fn main() -> Result<()> {
                                                 }
                                             }
                                             
+                                            let mut restart = String::new();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(policy) = &host_config.restart_policy {
+                                                    restart = policy.name.clone();
+                                                }
+                                            }
+                                            
                                             let action = Action::Replace {
                                                 old_id: c.id.clone(),
                                                 image,
@@ -889,6 +529,7 @@ async fn main() -> Result<()> {
                                                 env,
                                                 cpu,
                                                 memory,
+                                                restart,
                                             };
                                             let _ = tx_action.send(action).await;
                                             app.set_action_status("Rebuilding container...".to_string());
@@ -914,6 +555,133 @@ async fn main() -> Result<()> {
                                         let id = c.id.clone();
                                         app.set_action_status("Starting...".to_string());
                                         let _ = tx_action.send(Action::Start(id)).await;
+                                    }
+                                }
+                                KeyCode::Char('y') => {
+                                    if let Some(c) = app.get_selected_container() {
+                                        if let Some(inspect) = &app.current_inspection {
+                                            // Prepare YAML content
+                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
+                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
+                                            
+                                            // Extract Ports
+                                            let mut ports_vec = Vec::new();
+                                            if let Some(network_settings) = &inspect.network_settings {
+                                                if let Some(bindings) = &network_settings.ports {
+                                                    for (k, v) in bindings {
+                                                        if let Some(list) = v {
+                                                            if let Some(binding) = list.first() {
+                                                                let host_port = &binding.host_port;
+                                                                let container_port = k.trim_end_matches("/tcp");
+                                                                ports_vec.push(format!("{}:{}", host_port, container_port));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            let ports = ports_vec.join(",");
+
+                                            // Extract Env
+                                            let mut env_vec = Vec::new();
+                                            if let Some(config) = &inspect.config {
+                                                if let Some(envs) = &config.env {
+                                                    env_vec = envs.clone();
+                                                }
+                                            }
+                                            
+                                            // Extract Restart Policy
+                                            let mut restart = "no".to_string();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(policy) = &host_config.restart_policy {
+                                                    restart = policy.name.clone();
+                                                }
+                                            }
+
+                                            // Extract Resources
+                                            let mut cpu = "".to_string();
+                                            let mut memory = "".to_string();
+                                            if let Some(host_config) = &inspect.host_config {
+                                                if let Some(nano) = host_config.nano_cpus {
+                                                    if nano > 0 {
+                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
+                                                    }
+                                                }
+                                                if let Some(mem) = host_config.memory {
+                                                    if mem > 0 {
+                                                        if mem % (1024 * 1024 * 1024) == 0 {
+                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
+                                                        } else if mem % (1024 * 1024) == 0 {
+                                                            memory = format!("{}m", mem / (1024 * 1024));
+                                                        } else {
+                                                            memory = format!("{}", mem);
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            #[derive(serde::Serialize, serde::Deserialize)]
+                                            struct ContainerConfigYaml {
+                                                image: String,
+                                                name: String,
+                                                ports: String,
+                                                env: Vec<String>,
+                                                restart: String,
+                                                cpu: String,
+                                                memory: String,
+                                            }
+
+                                            let yaml_struct = ContainerConfigYaml {
+                                                image,
+                                                name,
+                                                ports,
+                                                env: env_vec,
+                                                restart,
+                                                cpu,
+                                                memory,
+                                            };
+
+                                            if let Ok(yaml_content) = serde_yaml::to_string(&yaml_struct) {
+                                                // Create temp file
+                                                let temp_file_path = format!("/tmp/docktop_edit_{}.yaml", c.id);
+                                                if std::fs::write(&temp_file_path, yaml_content).is_ok() {
+                                                    // Open Editor
+                                                    disable_raw_mode()?;
+                                                    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+                                                    
+                                                    let editor = std::env::var("EDITOR").unwrap_or("nano".to_string());
+                                                    let _ = std::process::Command::new(editor)
+                                                        .arg(&temp_file_path)
+                                                        .status();
+
+                                                    enable_raw_mode()?;
+                                                    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+                                                    terminal.clear()?;
+
+                                                    // Read back
+                                                    if let Ok(new_content) = std::fs::read_to_string(&temp_file_path) {
+                                                        if let Ok(new_config) = serde_yaml::from_str::<ContainerConfigYaml>(&new_content) {
+                                                            // Send Replace Action
+                                                            let action = Action::Replace {
+                                                                old_id: c.id.clone(),
+                                                                image: new_config.image,
+                                                                name: new_config.name,
+                                                                ports: new_config.ports,
+                                                                env: new_config.env.join(" "), // Simple join for now, ideally handle quoting
+                                                                cpu: new_config.cpu,
+                                                                memory: new_config.memory,
+                                                                restart: new_config.restart,
+                                                            };
+                                                            let _ = tx_action.send(action).await;
+                                                            app.set_action_status("Applying YAML changes...".to_string());
+                                                        } else {
+                                                            app.set_action_status("Invalid YAML format!".to_string());
+                                                        }
+                                                    }
+                                                    // Cleanup
+                                                    let _ = std::fs::remove_file(temp_file_path);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}

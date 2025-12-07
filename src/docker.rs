@@ -82,6 +82,16 @@ pub struct HostConfig {
     pub nano_cpus: Option<i64>,
     #[serde(rename = "Memory")]
     pub memory: Option<i64>,
+    #[serde(rename = "RestartPolicy")]
+    pub restart_policy: Option<RestartPolicy>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RestartPolicy {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "MaximumRetryCount")]
+    pub maximum_retry_count: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

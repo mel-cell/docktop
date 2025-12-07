@@ -40,6 +40,51 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_details {
         draw_details_popup(f, app, f.size(), theme);
     }
+    
+    if app.show_help {
+        draw_help_modal(f, app, f.size(), theme);
+    }
+}
+
+fn draw_help_modal(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
+    let block = Block::default()
+        .title(" Help / Shortcuts ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border));
+        
+    let area = centered_rect(60, 60, area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    
+    let rows = vec![
+        Row::new(vec!["Key", "Action", "Description"]),
+        Row::new(vec!["c", "Create", "Create a new container"]),
+        Row::new(vec!["e", "Edit", "Edit selected container config"]),
+        Row::new(vec!["d", "DB CLI", "Open Database CLI (MySQL, Postgres, etc)"]),
+        Row::new(vec!["b", "Rebuild", "Rebuild container from image"]),
+        Row::new(vec!["s", "Stop", "Stop selected container"]),
+        Row::new(vec!["u", "Start", "Start selected container"]),
+        Row::new(vec!["r", "Restart", "Restart selected container"]),
+        Row::new(vec!["x / Del", "Delete", "Remove selected container"]),
+        Row::new(vec!["Enter", "Details", "View container logs and stats"]),
+        Row::new(vec!["F5", "Refresh", "Force refresh container list"]),
+        Row::new(vec!["?", "Help", "Toggle this help window"]),
+        Row::new(vec!["q", "Quit", "Exit application"]),
+    ];
+    
+    let widths = [
+        Constraint::Length(10),
+        Constraint::Length(15),
+        Constraint::Min(10),
+    ];
+    
+    let table = Table::new(rows, widths)
+        .header(Row::new(vec!["Key", "Action", "Description"]).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD)).bottom_margin(1))
+        .block(Block::default().borders(Borders::NONE))
+        .column_spacing(1);
+        
+    f.render_widget(table, inner);
 }
 
 fn draw_title_bar(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
@@ -323,29 +368,36 @@ fn draw_network_section(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 
 fn draw_container_section(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(area);
+    let width = area.width;
+    
+    // Dynamic Layout: If width is small (< 100), hide sidebar or stack
+    if width < 100 {
+        draw_container_table(f, app, area, theme);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
+            .split(area);
 
-    let mut wizard_in_main = false;
-    if let Some(wizard) = &app.wizard {
-        if let crate::app::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
-            if editing_id.is_some() {
-                wizard_in_main = true;
+        let mut wizard_in_main = false;
+        if let Some(wizard) = &app.wizard {
+            if let crate::app::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
+                if editing_id.is_some() {
+                    wizard_in_main = true;
+                }
             }
         }
-    }
 
-    if wizard_in_main {
-        if let Some(wizard) = &app.wizard {
-            draw_wizard(f, wizard, chunks[0], theme);
+        if wizard_in_main {
+            if let Some(wizard) = &app.wizard {
+                draw_wizard(f, wizard, chunks[0], theme);
+            }
+        } else {
+            draw_container_table(f, app, chunks[0], theme);
         }
-    } else {
-        draw_container_table(f, app, chunks[0], theme);
+        
+        draw_container_sidebar(f, app, chunks[1], theme);
     }
-    
-    draw_container_sidebar(f, app, chunks[1], theme);
 }
 
 fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
@@ -405,6 +457,7 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
         Span::styled("[R] Restart ", Style::default().fg(theme.foreground)),
         Span::styled("[S] Stop ", Style::default().fg(theme.foreground)),
         Span::styled("[U] Start ", Style::default().fg(theme.foreground)),
+        Span::styled("[y] YAML ", Style::default().fg(theme.foreground)),
         Span::styled("[Del] Delete ", Style::default().fg(theme.foreground)),
         Span::styled("[Enter] Details ", Style::default().fg(theme.foreground)),
     ]);
@@ -544,12 +597,13 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let help = Paragraph::new("UP/DOWN: Navigate | ENTER: Select | ESC: Cancel").style(Style::default().fg(theme.border));
             f.render_widget(help, help_area[1]);
         },
-        crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id, port_status } => {
+        crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status } => {
             let title = if editing_id.is_some() { "Edit Container" } else { "Quick Pull & Run" };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1),
+                    Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
@@ -563,14 +617,18 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
-            let fields = [
+            let mut fields = vec![
                 ("Image Name", image),
                 ("Container Name", name),
                 ("Ports (host:container)", ports),
                 ("Env Vars (KEY=VAL)", env),
-                ("CPU Limit (e.g. 0.5)", cpu),
-                ("Memory Limit (e.g. 512m)", memory),
             ];
+
+            if *show_advanced {
+                fields.push(("CPU Limit (e.g. 0.5)", cpu));
+                fields.push(("Memory Limit (e.g. 512m)", memory));
+                fields.push(("Restart Policy (Space to cycle)", restart));
+            }
 
             for (i, (label, value)) in fields.iter().enumerate() {
                 let style = if *focused_field == i {
@@ -593,8 +651,13 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 f.render_widget(p, chunks[i+1]);
             }
             
-            let help = Paragraph::new("ENTER: Create/Update | TAB: Next Field").style(Style::default().fg(theme.border));
-            f.render_widget(help, chunks[7]);
+            let help_text = if *show_advanced {
+                "ENTER: Create/Update | TAB: Next Field | SPACE: Toggle Restart"
+            } else {
+                "ENTER: Create/Update | TAB: Next Field | Ctrl+A: Advanced Options"
+            };
+            let help = Paragraph::new(help_text).style(Style::default().fg(theme.border));
+            f.render_widget(help, chunks[8]);
         },
         crate::app::WizardStep::FileBrowser { current_path, list_state, items, mode } => {
              let title = match mode {
@@ -1127,7 +1190,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
 
     let keys = Span::styled(
-        " j/k: Nav • q: Quit",
+        " [j/k] Nav • [?] Help • [q] Quit",
         Style::default().fg(theme.border),
     );
 

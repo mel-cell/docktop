@@ -114,6 +114,8 @@ pub enum WizardStep {
         env: String,
         cpu: String,
         memory: String,
+        restart: String,
+        show_advanced: bool,
         focused_field: usize,
         editing_id: Option<String>,
         port_status: PortStatus,
@@ -184,10 +186,10 @@ pub enum WizardStep {
 
 #[derive(Clone)]
 pub enum WizardAction {
-    Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String },
+    Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String, restart: String },
     Build { tag: String, path: std::path::PathBuf, mount: bool },
     ComposeUp { path: std::path::PathBuf, override_path: Option<std::path::PathBuf> },
-    Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String },
+    Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String, restart: String },
     ScanJanitor,
     CleanJanitor(Vec<JanitorItem>),
     Close,
@@ -219,6 +221,7 @@ pub struct App {
     pub config: Config,
     pub fishes: Vec<Fish>,
     pub wizard: Option<WizardState>,
+    pub show_help: bool,
     pub globe_frames: Vec<Vec<String>>,
     pub _system: System,
 }
@@ -282,6 +285,7 @@ impl App {
             fishes,
             globe_frames,
             wizard: None,
+            show_help: false,
             _system: System::new_all(),
         }
     }
@@ -757,7 +761,9 @@ CMD ["app"]
         Ok(())
     }
 
-    pub fn wizard_handle_key(&mut self, key: KeyCode) -> Option<WizardAction> {
+    pub fn wizard_handle_key(&mut self, key_event: crossterm::event::KeyEvent) -> Option<WizardAction> {
+        let key = key_event.code;
+        let modifiers = key_event.modifiers;
         let mut next_step = None;
         let mut action_msg = None;
         let mut wizard_action = None;
@@ -777,6 +783,8 @@ CMD ["app"]
                                     env: String::new(),
                                     cpu: String::new(),
                                     memory: String::new(),
+                                    restart: "no".to_string(),
+                                    show_advanced: false,
                                     focused_field: 0,
                                     editing_id: None,
                                     port_status: PortStatus::None,
@@ -817,17 +825,37 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, focused_field, editing_id, port_status } => {
+                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status } => {
                     match key {
                         KeyCode::Down | KeyCode::Tab => {
-                            *focused_field = (*focused_field + 1) % 6;
+                            let max_fields = if *show_advanced { 7 } else { 4 }; // 0-3 are basic, 4-6 are advanced
+                            *focused_field = (*focused_field + 1) % max_fields;
                         }
                         KeyCode::Up | KeyCode::BackTab => {
+                            let max_fields = if *show_advanced { 7 } else { 4 };
                             if *focused_field > 0 {
                                 *focused_field -= 1;
                             } else {
-                                *focused_field = 5;
+                                *focused_field = max_fields - 1;
                             }
+                        }
+                        KeyCode::Char(' ') if *focused_field == 6 => {
+                             // Cycle restart policies
+                             *restart = match restart.as_str() {
+                                 "no" => "always".to_string(),
+                                 "always" => "unless-stopped".to_string(),
+                                 "unless-stopped" => "on-failure".to_string(),
+                                 _ => "no".to_string(),
+                             };
+                        }
+                        KeyCode::Char('a') if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) || *focused_field > 100 => { // Hacky way to detect advanced toggle? No, let's use a specific key or field.
+                             // Actually, let's just use a hotkey 'A' to toggle advanced?
+                             // Or maybe just 'Tab' eventually reaches a "Show Advanced" button?
+                             // Let's make 'Ctrl+a' toggle advanced
+                             *show_advanced = !*show_advanced;
+                             if !*show_advanced && *focused_field >= 4 {
+                                 *focused_field = 0;
+                             }
                         }
                         KeyCode::Char(c) => {
                             let target = match *focused_field {
@@ -837,9 +865,12 @@ CMD ["app"]
                                 3 => env,
                                 4 => cpu,
                                 5 => memory,
+                                // 6 is restart, handled by Space
                                 _ => image,
                             };
-                            target.push(c);
+                            if *focused_field != 6 {
+                                target.push(c);
+                            }
                             if *focused_field == 2 {
                                 *port_status = Self::check_port(ports);
                             }
@@ -852,9 +883,12 @@ CMD ["app"]
                                 3 => env,
                                 4 => cpu,
                                 5 => memory,
+                                // 6 is restart
                                 _ => image,
                             };
-                            target.pop();
+                            if *focused_field != 6 {
+                                target.pop();
+                            }
                             if *focused_field == 2 {
                                 *port_status = Self::check_port(ports);
                             }
@@ -874,6 +908,7 @@ CMD ["app"]
                                     env: env.clone(),
                                     cpu: cpu.clone(),
                                     memory: memory.clone(),
+                                    restart: restart.clone(),
                                 });
                             } else {
                                 action_msg = Some(format!("Creating container from {}", image));
@@ -884,6 +919,7 @@ CMD ["app"]
                                     env: env.clone(),
                                     cpu: cpu.clone(),
                                     memory: memory.clone(),
+                                    restart: restart.clone(),
                                 });
                             }
                         }
