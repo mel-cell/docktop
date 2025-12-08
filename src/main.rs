@@ -1,7 +1,7 @@
 use std::{io, time::Duration};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,6 +17,7 @@ mod ui;
 mod theme;
 mod action;
 pub mod wizard;
+mod keys;
 
 use action::Action;
 
@@ -317,402 +318,299 @@ async fn main() -> Result<()> {
         if crossterm::event::poll(timeout)? {
             last_user_event = std::time::Instant::now();
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => {
+                if keys::key_matches(key, &app.config.keys.quit) {
                     if app.wizard.is_some() {
                         app.toggle_wizard();
                     } else {
                         break;
                     }
-                }
-                KeyCode::F(5) => {
+                } else if keys::key_matches(key, &app.config.keys.refresh) {
                     let _ = tx_action.send(Action::RefreshContainers).await;
-                }
-                KeyCode::Char('w') => {
+                } else if keys::key_matches(key, &app.config.keys.toggle_wizard) {
                     app.toggle_wizard();
-                }
-                KeyCode::Char('c') | KeyCode::Tab => {
+                } else if keys::key_matches(key, "c") || keys::key_matches(key, "Tab") {
                     if app.wizard.is_none() {
                         app.toggle_wizard();
                     }
-                }
-                KeyCode::Esc => {
+                } else if keys::key_matches(key, "Esc") {
                     if app.show_help {
                         app.show_help = false;
                     } else if app.wizard.is_some() {
                         app.toggle_wizard();
                     }
-                }
-                KeyCode::Char('?') => {
+                } else if keys::key_matches(key, &app.config.keys.toggle_help) {
                     app.show_help = !app.show_help;
-                }
-                    _ => {
-                        if app.show_help {
-                            // Ignore other keys when help is shown, except maybe q to close?
-                            // Let's just let ? or Esc close it.
-                        } else if app.wizard.is_some() {
-                                if let Some(wizard_action) = app.wizard_handle_key(key) {
-                                    if let crate::wizard::models::WizardAction::Close = wizard_action {
-                                        app.wizard = None;
-                                    } else {
-                                        let action = match wizard_action {
-                                            crate::wizard::models::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
-                                            crate::wizard::models::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
-                                            crate::wizard::models::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
-                                            crate::wizard::models::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
-                                            crate::wizard::models::WizardAction::ScanJanitor => Action::ScanJanitor,
-                                            crate::wizard::models::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
-                                            crate::wizard::models::WizardAction::Close => unreachable!(),
-                                        };
-                                        let _ = tx_action.send(action).await;
-                                    }
-                                }
-                        } else {
-                            match key.code {
-                                KeyCode::Enter => {
-                                    app.show_details = !app.show_details;
-                                }
-                                KeyCode::Delete | KeyCode::Char('x') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        let _ = tx_action.send(Action::Delete(c.id.clone())).await;
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    app.next();
-                                    if let Some(c) = app.get_selected_container() {
-                                        let _ = tx_target.send(Some(c.id.clone()));
-                                    }
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    app.previous();
-                                    if let Some(c) = app.get_selected_container() {
-                                        let _ = tx_target.send(Some(c.id.clone()));
-                                    }
-                                }
-                                KeyCode::Char('E') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        if let Some(inspect) = &app.current_inspection {
-                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
-                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
-                                            
-                                            let mut ports = String::new();
-                                            if let Some(network_settings) = &inspect.network_settings {
-                                                if let Some(bindings) = &network_settings.ports {
-                                                    for (k, v) in bindings {
-                                                        if let Some(list) = v {
-                                                            if let Some(binding) = list.first() {
-                                                                let host_port = &binding.host_port;
-                                                                let container_port = k.trim_end_matches("/tcp");
-                                                                ports = format!("{}:{}", host_port, container_port);
-                                                                break; // Just take first one for now
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            let mut env = String::new();
-                                            if let Some(config) = &inspect.config {
-                                                if let Some(envs) = &config.env {
-                                                    if let Some(first_env) = envs.first() {
-                                                        env = first_env.clone();
-                                                    }
-                                                }
-                                            }
-
-                                            let mut cpu = String::new();
-                                            let mut memory = String::new();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(nano) = host_config.nano_cpus {
-                                                    if nano > 0 {
-                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
-                                                    }
-                                                }
-                                                if let Some(mem) = host_config.memory {
-                                                    if mem > 0 {
-                                                        if mem % (1024 * 1024 * 1024) == 0 {
-                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
-                                                        } else if mem % (1024 * 1024) == 0 {
-                                                            memory = format!("{}m", mem / (1024 * 1024));
-                                                        } else if mem % 1024 == 0 {
-                                                            memory = format!("{}k", mem / 1024);
-                                                        } else {
-                                                            memory = format!("{}", mem);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            
-                                            let mut restart = String::new();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(policy) = &host_config.restart_policy {
-                                                    restart = policy.name.clone();
-                                                }
-                                            }
-
-                                            app.wizard = Some(crate::wizard::models::WizardState {
-                                                step: crate::wizard::models::WizardStep::QuickRunInput {
-                                                    image,
-                                                    name,
-                                                    ports,
-                                                    env,
-                                                    cpu,
-                                                    memory,
-                                                    restart,
-                                                    show_advanced: false,
-                                                    focused_field: 0,
-                                                    editing_id: Some(c.id.clone()),
-                                                    port_status: crate::wizard::models::PortStatus::None,
-                                                    profile: crate::wizard::models::ResourceProfile::Custom,
-                                                },
-                                            });
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('e') => {
-                    if let Some(container) = app.get_selected_container() {
-                        let id = container.id.clone();
-                        let cli_path = app.config.general.docker_cli_path.clone();
-                        let _ = enter_container_shell(&id, &mut terminal, &cli_path);
-                        terminal.clear()?;
-                    }
-                }
-                KeyCode::Char('d') => {
-                    if let Some(container) = app.get_selected_container() {
-                        let image = container.image.to_lowercase();
-                        if image.contains("mysql") || image.contains("mariadb") || image.contains("postgres") || image.contains("redis") || image.contains("mongo") {
-                            let id = container.id.clone();
-                            let cli_path = app.config.general.docker_cli_path.clone();
-                            let _ = enter_database_cli(&id, &container.image, &mut terminal, &cli_path);
-                            terminal.clear()?;
+                } else {
+                    if app.show_help {
+                        // Ignore other keys when help is shown
+                    } else if app.wizard.is_some() {
+                        if let Some(wizard_action) = app.wizard_handle_key(key) {
+                            if let crate::wizard::models::WizardAction::Close = wizard_action {
+                                app.wizard = None;
+                            } else {
+                                let action = match wizard_action {
+                                    crate::wizard::models::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
+                                    crate::wizard::models::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
+                                    crate::wizard::models::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
+                                    crate::wizard::models::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
+                                    crate::wizard::models::WizardAction::ScanJanitor => Action::ScanJanitor,
+                                    crate::wizard::models::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
+                                    crate::wizard::models::WizardAction::Close => unreachable!(),
+                                };
+                                let _ = tx_action.send(action).await;
+                            }
                         }
-                    }
-                }
-                                KeyCode::Char('b') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        if let Some(inspect) = &app.current_inspection {
-                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
-                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
-                                            
-                                            let mut ports = String::new();
-                                            if let Some(network_settings) = &inspect.network_settings {
-                                                if let Some(bindings) = &network_settings.ports {
-                                                    for (k, v) in bindings {
-                                                        if let Some(list) = v {
-                                                            if let Some(binding) = list.first() {
-                                                                let host_port = &binding.host_port;
-                                                                let container_port = k.trim_end_matches("/tcp");
-                                                                ports = format!("{}:{}", host_port, container_port);
-                                                                break; 
-                                                            }
-                                                        }
+                    } else {
+                        if keys::key_matches(key, &app.config.keys.enter) {
+                            app.show_details = !app.show_details;
+                        } else if keys::key_matches(key, &app.config.keys.delete) {
+                            if let Some(c) = app.get_selected_container() {
+                                let _ = tx_action.send(Action::Delete(c.id.clone())).await;
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.down) {
+                            app.next();
+                            if let Some(c) = app.get_selected_container() {
+                                let _ = tx_target.send(Some(c.id.clone()));
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.up) {
+                            app.previous();
+                            if let Some(c) = app.get_selected_container() {
+                                let _ = tx_target.send(Some(c.id.clone()));
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.edit) {
+                            if let Some(c) = app.get_selected_container() {
+                                if let Some(inspect) = &app.current_inspection {
+                                    let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
+                                    let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
+                                    
+                                    let mut ports = String::new();
+                                    if let Some(network_settings) = &inspect.network_settings {
+                                        if let Some(bindings) = &network_settings.ports {
+                                            for (k, v) in bindings {
+                                                if let Some(list) = v {
+                                                    if let Some(binding) = list.first() {
+                                                        let host_port = &binding.host_port;
+                                                        let container_port = k.trim_end_matches("/tcp");
+                                                        ports = format!("{}:{}", host_port, container_port);
+                                                        break; 
                                                     }
-                                                }
-                                            }
-
-                                            let mut env = String::new();
-                                            if let Some(config) = &inspect.config {
-                                                if let Some(envs) = &config.env {
-                                                    if let Some(first_env) = envs.first() {
-                                                        env = first_env.clone();
-                                                    }
-                                                }
-                                            }
-
-                                            let mut cpu = String::new();
-                                            let mut memory = String::new();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(nano) = host_config.nano_cpus {
-                                                    if nano > 0 {
-                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
-                                                    }
-                                                }
-                                                if let Some(mem) = host_config.memory {
-                                                    if mem > 0 {
-                                                        if mem % (1024 * 1024 * 1024) == 0 {
-                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
-                                                        } else if mem % (1024 * 1024) == 0 {
-                                                            memory = format!("{}m", mem / (1024 * 1024));
-                                                        } else if mem % 1024 == 0 {
-                                                            memory = format!("{}k", mem / 1024);
-                                                        } else {
-                                                            memory = format!("{}", mem);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            
-                                            let mut restart = String::new();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(policy) = &host_config.restart_policy {
-                                                    restart = policy.name.clone();
-                                                }
-                                            }
-                                            
-                                            let action = Action::Replace {
-                                                old_id: c.id.clone(),
-                                                image,
-                                                name,
-                                                ports,
-                                                env,
-                                                cpu,
-                                                memory,
-                                                restart,
-                                            };
-                                            let _ = tx_action.send(action).await;
-                                            app.set_action_status("Rebuilding container...".to_string());
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('r') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        let id = c.id.clone();
-                                        app.set_action_status("Restarting...".to_string());
-                                        let _ = tx_action.send(Action::Restart(id)).await;
-                                    }
-                                }
-                                KeyCode::Char('s') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        let id = c.id.clone();
-                                        app.set_action_status("Stopping...".to_string());
-                                        let _ = tx_action.send(Action::Stop(id)).await;
-                                    }
-                                }
-                                KeyCode::Char('u') => { // 'u' for Up/Start
-                                    if let Some(c) = app.get_selected_container() {
-                                        let id = c.id.clone();
-                                        app.set_action_status("Starting...".to_string());
-                                        let _ = tx_action.send(Action::Start(id)).await;
-                                    }
-                                }
-                                KeyCode::Char('y') => {
-                                    if let Some(c) = app.get_selected_container() {
-                                        if let Some(inspect) = &app.current_inspection {
-                                            // Prepare YAML content
-                                            let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
-                                            let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
-                                            
-                                            // Extract Ports
-                                            let mut ports_vec = Vec::new();
-                                            if let Some(network_settings) = &inspect.network_settings {
-                                                if let Some(bindings) = &network_settings.ports {
-                                                    for (k, v) in bindings {
-                                                        if let Some(list) = v {
-                                                            if let Some(binding) = list.first() {
-                                                                let host_port = &binding.host_port;
-                                                                let container_port = k.trim_end_matches("/tcp");
-                                                                ports_vec.push(format!("{}:{}", host_port, container_port));
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            let ports = ports_vec.join(",");
-
-                                            // Extract Env
-                                            let mut env_vec = Vec::new();
-                                            if let Some(config) = &inspect.config {
-                                                if let Some(envs) = &config.env {
-                                                    env_vec = envs.clone();
-                                                }
-                                            }
-                                            
-                                            // Extract Restart Policy
-                                            let mut restart = "no".to_string();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(policy) = &host_config.restart_policy {
-                                                    restart = policy.name.clone();
-                                                }
-                                            }
-
-                                            // Extract Resources
-                                            let mut cpu = "".to_string();
-                                            let mut memory = "".to_string();
-                                            if let Some(host_config) = &inspect.host_config {
-                                                if let Some(nano) = host_config.nano_cpus {
-                                                    if nano > 0 {
-                                                        cpu = format!("{}", nano as f64 / 1_000_000_000.0);
-                                                    }
-                                                }
-                                                if let Some(mem) = host_config.memory {
-                                                    if mem > 0 {
-                                                        if mem % (1024 * 1024 * 1024) == 0 {
-                                                            memory = format!("{}g", mem / (1024 * 1024 * 1024));
-                                                        } else if mem % (1024 * 1024) == 0 {
-                                                            memory = format!("{}m", mem / (1024 * 1024));
-                                                        } else {
-                                                            memory = format!("{}", mem);
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            #[derive(serde::Serialize, serde::Deserialize)]
-                                            struct ContainerConfigYaml {
-                                                image: String,
-                                                name: String,
-                                                ports: String,
-                                                env: Vec<String>,
-                                                restart: String,
-                                                cpu: String,
-                                                memory: String,
-                                            }
-
-                                            let yaml_struct = ContainerConfigYaml {
-                                                image,
-                                                name,
-                                                ports,
-                                                env: env_vec,
-                                                restart,
-                                                cpu,
-                                                memory,
-                                            };
-
-                                            if let Ok(yaml_content) = serde_yaml::to_string(&yaml_struct) {
-                                                // Create temp file
-                                                let temp_file_path = format!("/tmp/docktop_edit_{}.yaml", c.id);
-                                                if std::fs::write(&temp_file_path, yaml_content).is_ok() {
-                                                    // Open Editor
-                                                    disable_raw_mode()?;
-                                                    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
-                                                    
-                                                    let editor = std::env::var("EDITOR").unwrap_or("nano".to_string());
-                                                    let _ = std::process::Command::new(editor)
-                                                        .arg(&temp_file_path)
-                                                        .status();
-
-                                                    enable_raw_mode()?;
-                                                    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-                                                    terminal.clear()?;
-
-                                                    // Read back
-                                                    if let Ok(new_content) = std::fs::read_to_string(&temp_file_path) {
-                                                        if let Ok(new_config) = serde_yaml::from_str::<ContainerConfigYaml>(&new_content) {
-                                                            // Send Replace Action
-                                                            let action = Action::Replace {
-                                                                old_id: c.id.clone(),
-                                                                image: new_config.image,
-                                                                name: new_config.name,
-                                                                ports: new_config.ports,
-                                                                env: new_config.env.join(" "), // Simple join for now, ideally handle quoting
-                                                                cpu: new_config.cpu,
-                                                                memory: new_config.memory,
-                                                                restart: new_config.restart,
-                                                            };
-                                                            let _ = tx_action.send(action).await;
-                                                            app.set_action_status("Applying YAML changes...".to_string());
-                                                        } else {
-                                                            app.set_action_status("Invalid YAML format!".to_string());
-                                                        }
-                                                    }
-                                                    // Cleanup
-                                                    let _ = std::fs::remove_file(temp_file_path);
                                                 }
                                             }
                                         }
                                     }
+
+                                    let mut env = String::new();
+                                    if let Some(config) = &inspect.config {
+                                        if let Some(envs) = &config.env {
+                                            if let Some(first_env) = envs.first() {
+                                                env = first_env.clone();
+                                            }
+                                        }
+                                    }
+
+                                    let mut cpu = String::new();
+                                    let mut memory = String::new();
+                                    if let Some(host_config) = &inspect.host_config {
+                                        if let Some(nano) = host_config.nano_cpus {
+                                            if nano > 0 {
+                                                cpu = format!("{}", nano as f64 / 1_000_000_000.0);
+                                            }
+                                        }
+                                        if let Some(mem) = host_config.memory {
+                                            if mem > 0 {
+                                                if mem % (1024 * 1024 * 1024) == 0 {
+                                                    memory = format!("{}g", mem / (1024 * 1024 * 1024));
+                                                } else if mem % (1024 * 1024) == 0 {
+                                                    memory = format!("{}m", mem / (1024 * 1024));
+                                                } else if mem % 1024 == 0 {
+                                                    memory = format!("{}k", mem / 1024);
+                                                } else {
+                                                    memory = format!("{}", mem);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    let mut restart = String::new();
+                                    if let Some(host_config) = &inspect.host_config {
+                                        if let Some(policy) = &host_config.restart_policy {
+                                            restart = policy.name.clone();
+                                        }
+                                    }
+
+                                    app.wizard = Some(crate::wizard::models::WizardState {
+                                        step: crate::wizard::models::WizardStep::QuickRunInput {
+                                            image,
+                                            name,
+                                            ports,
+                                            env,
+                                            cpu,
+                                            memory,
+                                            restart,
+                                            show_advanced: true,
+                                            focused_field: 0,
+                                            editing_id: Some(c.id.clone()),
+                                            port_status: crate::wizard::models::PortStatus::None,
+                                            profile: crate::wizard::models::ResourceProfile::Custom,
+                                        },
+                                    });
                                 }
-                                _ => {}
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.shell) {
+                             if let Some(container) = app.get_selected_container() {
+                                let id = container.id.clone();
+                                let cli_path = app.config.general.docker_cli_path.clone();
+                                let _ = enter_container_shell(&id, &mut terminal, &cli_path);
+                                terminal.clear()?;
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.db_cli) {
+                             if let Some(container) = app.get_selected_container() {
+                                let image = container.image.to_lowercase();
+                                if image.contains("mysql") || image.contains("mariadb") || image.contains("postgres") || image.contains("redis") || image.contains("mongo") {
+                                    let id = container.id.clone();
+                                    let cli_path = app.config.general.docker_cli_path.clone();
+                                    let _ = enter_database_cli(&id, &container.image, &mut terminal, &cli_path);
+                                    terminal.clear()?;
+                                }
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.restart) {
+                            if let Some(c) = app.get_selected_container() {
+                                let id = c.id.clone();
+                                app.set_action_status("Restarting...".to_string());
+                                let _ = tx_action.send(Action::Restart(id)).await;
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.stop) {
+                            if let Some(c) = app.get_selected_container() {
+                                let id = c.id.clone();
+                                app.set_action_status("Stopping...".to_string());
+                                let _ = tx_action.send(Action::Stop(id)).await;
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.start) {
+                            if let Some(c) = app.get_selected_container() {
+                                let id = c.id.clone();
+                                app.set_action_status("Starting...".to_string());
+                                let _ = tx_action.send(Action::Start(id)).await;
+                            }
+                        } else if keys::key_matches(key, &app.config.keys.yaml) {
+                             if let Some(c) = app.get_selected_container() {
+                                if let Some(inspect) = &app.current_inspection {
+                                    // Prepare YAML content
+                                    let image = inspect.config.as_ref().map(|c| c.image.clone()).unwrap_or_default();
+                                    let name = inspect.name.as_ref().map(|n| n.trim_start_matches('/').to_string()).unwrap_or_default();
+                                    
+                                    // Extract Ports
+                                    let mut ports_vec = Vec::new();
+                                    if let Some(network_settings) = &inspect.network_settings {
+                                        if let Some(bindings) = &network_settings.ports {
+                                            for (k, v) in bindings {
+                                                if let Some(list) = v {
+                                                    if let Some(binding) = list.first() {
+                                                        let host_port = &binding.host_port;
+                                                        let container_port = k.trim_end_matches("/tcp");
+                                                        ports_vec.push(format!("{}:{}", host_port, container_port));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let ports = ports_vec.join(",");
+
+                                    // Extract Env
+                                    let mut env_vec = Vec::new();
+                                    if let Some(config) = &inspect.config {
+                                        if let Some(envs) = &config.env {
+                                            env_vec = envs.clone();
+                                        }
+                                    }
+                                    
+                                    // Extract Restart Policy
+                                    let mut restart = "no".to_string();
+                                    if let Some(host_config) = &inspect.host_config {
+                                        if let Some(policy) = &host_config.restart_policy {
+                                            restart = policy.name.clone();
+                                        }
+                                    }
+
+                                    // Extract Resources
+                                    let mut cpu = "".to_string();
+                                    let mut memory = "".to_string();
+                                    if let Some(host_config) = &inspect.host_config {
+                                        if let Some(nano) = host_config.nano_cpus {
+                                            if nano > 0 {
+                                                cpu = format!("{}", nano as f64 / 1_000_000_000.0);
+                                            }
+                                        }
+                                        if let Some(mem) = host_config.memory {
+                                            if mem > 0 {
+                                                if mem % (1024 * 1024 * 1024) == 0 {
+                                                    memory = format!("{}g", mem / (1024 * 1024 * 1024));
+                                                } else if mem % (1024 * 1024) == 0 {
+                                                    memory = format!("{}m", mem / (1024 * 1024));
+                                                } else {
+                                                    memory = format!("{}", mem);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    #[derive(serde::Serialize, serde::Deserialize)]
+                                    struct ContainerConfigYaml {
+                                        image: String,
+                                        name: String,
+                                        ports: String,
+                                        env: Vec<String>,
+                                        restart: String,
+                                        cpu: String,
+                                        memory: String,
+                                    }
+
+                                    let yaml_struct = ContainerConfigYaml {
+                                        image,
+                                        name,
+                                        ports,
+                                        env: env_vec,
+                                        restart,
+                                        cpu,
+                                        memory,
+                                    };
+
+                                    if let Ok(yaml_content) = serde_yaml::to_string(&yaml_struct) {
+                                        let temp_file_path = format!("/tmp/docktop_edit_{}.yaml", c.id);
+                                        if std::fs::write(&temp_file_path, yaml_content).is_ok() {
+                                            disable_raw_mode()?;
+                                            execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+                                            
+                                            let editor = std::env::var("EDITOR").unwrap_or("nano".to_string());
+                                            let _ = std::process::Command::new(editor)
+                                                .arg(&temp_file_path)
+                                                .status();
+
+                                            enable_raw_mode()?;
+                                            execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+                                            terminal.clear()?;
+
+                                            if let Ok(new_content) = std::fs::read_to_string(&temp_file_path) {
+                                                if let Ok(new_config) = serde_yaml::from_str::<ContainerConfigYaml>(&new_content) {
+                                                    let action = Action::Replace {
+                                                        old_id: c.id.clone(),
+                                                        image: new_config.image,
+                                                        name: new_config.name,
+                                                        ports: new_config.ports,
+                                                        env: new_config.env.join(" "),
+                                                        cpu: new_config.cpu,
+                                                        memory: new_config.memory,
+                                                        restart: new_config.restart,
+                                                    };
+                                                    let _ = tx_action.send(action).await;
+                                                    app.set_action_status("Applying YAML changes...".to_string());
+                                                } else {
+                                                    app.set_action_status("Invalid YAML format!".to_string());
+                                                }
+                                            }
+                                            let _ = std::fs::remove_file(temp_file_path);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

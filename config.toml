@@ -25,3 +25,21 @@ socket_path = "unix:///var/run/docker.sock"
 # --- 3. PENGATURAN TAMPILAN (THEME ENGINE) ---
 # Theme sekarang dimuat dari file eksternal di folder themes/
 # Contoh: themes/dracula.toml, themes/gruvbox.toml
+
+[keys]
+quit = "q"
+refresh = "F5"
+toggle_wizard = "w"
+toggle_help = "?"
+up = "k"
+down = "j"
+enter = "Enter"
+delete = "x"
+details = "Enter"
+edit = "E"
+shell = "e"
+db_cli = "d"
+restart = "r"
+stop = "s"
+start = "v"
+yaml = "y"

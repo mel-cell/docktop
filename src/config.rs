@@ -9,12 +9,57 @@ pub struct Config {
     pub general: GeneralConfig,
     #[serde(default)]
     pub docker: DockerConfig,
+    #[serde(default)]
+    pub keys: KeyConfig,
     
     #[serde(skip)]
     pub theme_data: Theme,
     
     #[serde(skip)]
     pub config_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct KeyConfig {
+    pub quit: String,
+    pub refresh: String,
+    pub toggle_wizard: String,
+    pub toggle_help: String,
+    pub up: String,
+    pub down: String,
+    pub enter: String,
+    pub delete: String,
+    pub details: String,
+    pub edit: String,
+    pub shell: String,
+    pub db_cli: String,
+    pub restart: String,
+    pub stop: String,
+    pub start: String,
+    pub yaml: String,
+}
+
+impl Default for KeyConfig {
+    fn default() -> Self {
+        Self {
+            quit: "q".to_string(),
+            refresh: "F5".to_string(),
+            toggle_wizard: "w".to_string(),
+            toggle_help: "?".to_string(),
+            up: "k".to_string(),
+            down: "j".to_string(),
+            enter: "Enter".to_string(),
+            delete: "x".to_string(),
+            details: "Enter".to_string(),
+            edit: "E".to_string(),
+            shell: "e".to_string(),
+            db_cli: "d".to_string(),
+            restart: "r".to_string(),
+            stop: "s".to_string(),
+            start: "v".to_string(),
+            yaml: "y".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -83,6 +128,10 @@ pub struct ThemeDefinition {
     pub memory_chart: String,
     pub network_rx: String,
     pub network_tx: String,
+    pub chart_low: String,
+    pub chart_mid: String,
+    pub chart_high: String,
+    pub header_bg: String,
 }
 
 impl Default for ThemeDefinition {
@@ -104,6 +153,10 @@ impl Default for ThemeDefinition {
             memory_chart: "#bd93f9".to_string(),
             network_rx: "#8be9fd".to_string(),
             network_tx: "#ff79c6".to_string(),
+            chart_low: "#50fa7b".to_string(),
+            chart_mid: "#ffb86c".to_string(),
+            chart_high: "#ff5555".to_string(),
+            header_bg: "#44475a".to_string(),
         }
     }
 }
@@ -125,6 +178,10 @@ pub struct Theme {
     pub memory_chart: Color,
     pub network_rx: Color,
     pub network_tx: Color,
+    pub chart_low: Color,
+    pub chart_mid: Color,
+    pub chart_high: Color,
+    pub header_bg: Color,
 }
 
 impl Default for Theme {
@@ -151,6 +208,10 @@ impl Theme {
             memory_chart: parse_hex_color(&def.memory_chart),
             network_rx: parse_hex_color(&def.network_rx),
             network_tx: parse_hex_color(&def.network_tx),
+            chart_low: parse_hex_color(&def.chart_low),
+            chart_mid: parse_hex_color(&def.chart_mid),
+            chart_high: parse_hex_color(&def.chart_high),
+            header_bg: parse_hex_color(&def.header_bg),
         }
     }
 }
@@ -180,6 +241,7 @@ impl Config {
         let mut config: Config = toml::from_str(&content).unwrap_or_else(|_| Config {
             general: GeneralConfig::default(),
             docker: DockerConfig::default(),
+            keys: KeyConfig::default(),
             theme_data: Theme::default(),
             config_path: None,
         });
@@ -251,6 +313,10 @@ pub fn get_preset_theme_def(name: &str) -> ThemeDefinition {
             memory_chart: "#aaaaaa".to_string(),
             network_rx: "#ffffff".to_string(),
             network_tx: "#aaaaaa".to_string(),
+            chart_low: "#555555".to_string(),
+            chart_mid: "#aaaaaa".to_string(),
+            chart_high: "#ffffff".to_string(),
+            header_bg: "#333333".to_string(),
         },
         "gruvbox" | "gruvbox dark" => ThemeDefinition {
             name: "Gruvbox Dark".to_string(),
@@ -269,6 +335,10 @@ pub fn get_preset_theme_def(name: &str) -> ThemeDefinition {
             memory_chart: "#d3869b".to_string(),
             network_rx: "#83a598".to_string(),
             network_tx: "#fe8019".to_string(),
+            chart_low: "#b8bb26".to_string(),
+            chart_mid: "#fabd2f".to_string(),
+            chart_high: "#fb4934".to_string(),
+            header_bg: "#3c3836".to_string(),
         },
         "cyberpunk" | "cyberpunk neon" => ThemeDefinition {
             name: "Cyberpunk Neon".to_string(),
@@ -287,6 +357,10 @@ pub fn get_preset_theme_def(name: &str) -> ThemeDefinition {
             memory_chart: "#bd00ff".to_string(),
             network_rx: "#00b8ff".to_string(),
             network_tx: "#ff0055".to_string(),
+            chart_low: "#00ff9f".to_string(),
+            chart_mid: "#00b8ff".to_string(),
+            chart_high: "#ff0055".to_string(),
+            header_bg: "#111111".to_string(),
         },
         _ => ThemeDefinition::default(),
     }

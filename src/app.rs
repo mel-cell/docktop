@@ -12,6 +12,7 @@ use crate::wizard::models::*;
 #[derive(Clone)]
 pub struct Fish {
     pub x: f64,
+    #[allow(dead_code)]
     pub y: usize, // Vertical lane (0-4)
     pub direction: f64,
     pub speed: f64,
@@ -36,6 +37,7 @@ pub struct App {
     pub fishes: Vec<Fish>,
     pub wizard: Option<WizardState>,
     pub show_help: bool,
+    #[allow(dead_code)]
     pub globe_frames: Vec<Vec<String>>,
     pub _system: System,
 }

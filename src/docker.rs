@@ -17,6 +17,20 @@ pub struct Container {
     pub state: String,
     #[serde(rename = "Status")]
     pub status: String,
+    #[serde(rename = "Ports")]
+    pub ports: Vec<Port>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Port {
+    #[serde(rename = "IP")]
+    pub ip: Option<String>,
+    #[serde(rename = "PrivatePort")]
+    pub private_port: u16,
+    #[serde(rename = "PublicPort")]
+    pub public_port: Option<u16>,
+    #[serde(rename = "Type")]
+    pub type_: String,
 }
 
 
