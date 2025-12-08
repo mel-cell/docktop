@@ -16,6 +16,7 @@ mod docker;
 mod ui;
 mod theme;
 mod action;
+pub mod wizard;
 
 use action::Action;
 
@@ -137,7 +138,7 @@ async fn main() -> Result<()> {
     let (tx_target, rx_target) = watch::channel::<Option<String>>(None);
     let (tx_action, rx_action) = mpsc::channel::<Action>(10);
     let (tx_action_result, mut rx_action_result) = mpsc::channel::<String>(10);
-    let (tx_janitor_items, mut rx_janitor_items) = mpsc::channel::<Vec<app::JanitorItem>>(10);
+    let (tx_janitor_items, mut rx_janitor_items) = mpsc::channel::<Vec<crate::wizard::models::JanitorItem>>(10);
     let (tx_refresh, mut rx_refresh) = mpsc::channel::<()>(1);
 
     // Docker Client (Shared)
@@ -327,6 +328,9 @@ async fn main() -> Result<()> {
                 KeyCode::F(5) => {
                     let _ = tx_action.send(Action::RefreshContainers).await;
                 }
+                KeyCode::Char('w') => {
+                    app.toggle_wizard();
+                }
                 KeyCode::Char('c') | KeyCode::Tab => {
                     if app.wizard.is_none() {
                         app.toggle_wizard();
@@ -348,17 +352,17 @@ async fn main() -> Result<()> {
                             // Let's just let ? or Esc close it.
                         } else if app.wizard.is_some() {
                                 if let Some(wizard_action) = app.wizard_handle_key(key) {
-                                    if let app::WizardAction::Close = wizard_action {
+                                    if let crate::wizard::models::WizardAction::Close = wizard_action {
                                         app.wizard = None;
                                     } else {
                                         let action = match wizard_action {
-                                            app::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
-                                            app::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
-                                            app::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
-                                            app::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
-                                            app::WizardAction::ScanJanitor => Action::ScanJanitor,
-                                            app::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
-                                            app::WizardAction::Close => unreachable!(),
+                                            crate::wizard::models::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
+                                            crate::wizard::models::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
+                                            crate::wizard::models::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
+                                            crate::wizard::models::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
+                                            crate::wizard::models::WizardAction::ScanJanitor => Action::ScanJanitor,
+                                            crate::wizard::models::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
+                                            crate::wizard::models::WizardAction::Close => unreachable!(),
                                         };
                                         let _ = tx_action.send(action).await;
                                     }
@@ -446,8 +450,8 @@ async fn main() -> Result<()> {
                                                 }
                                             }
 
-                                            app.wizard = Some(app::WizardState {
-                                                step: app::WizardStep::QuickRunInput {
+                                            app.wizard = Some(crate::wizard::models::WizardState {
+                                                step: crate::wizard::models::WizardStep::QuickRunInput {
                                                     image,
                                                     name,
                                                     ports,
@@ -458,7 +462,8 @@ async fn main() -> Result<()> {
                                                     show_advanced: false,
                                                     focused_field: 0,
                                                     editing_id: Some(c.id.clone()),
-                                                    port_status: app::PortStatus::None,
+                                                    port_status: crate::wizard::models::PortStatus::None,
+                                                    profile: crate::wizard::models::ResourceProfile::Custom,
                                                 },
                                             });
                                         }
@@ -811,7 +816,7 @@ async fn main() -> Result<()> {
             // Update Janitor Items
             while let Ok(items) = rx_janitor_items.try_recv() {
                 if let Some(wizard) = &mut app.wizard {
-                    if let app::WizardStep::Janitor { items: ref mut current_items, loading, .. } = &mut wizard.step {
+                    if let crate::wizard::models::WizardStep::Janitor { items: ref mut current_items, loading, .. } = &mut wizard.step {
                         *current_items = items;
                         *loading = false;
                     }

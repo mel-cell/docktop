@@ -5,195 +5,9 @@ use std::collections::VecDeque;
 use std::fs;
 use sysinfo::System;
 use ratatui::widgets::ListState;
+use crate::wizard::models::*;
 
-#[derive(Clone)]
-pub struct WizardState {
-    pub step: WizardStep,
-}
 
-#[derive(Clone, Debug)]
-pub struct JanitorItem {
-    pub id: String,
-    pub name: String,
-    pub kind: JanitorItemKind,
-    pub size: u64,
-    pub age: String,
-    pub selected: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum JanitorItemKind {
-    Image,
-    Volume,
-    Container,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum PortStatus {
-    None,
-    Available,
-    Occupied(String), // Process info
-    Invalid,
-}
-
-#[derive(Clone, PartialEq)]
-pub enum FileBrowserMode {
-    Build,
-    Compose,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Framework {
-    Laravel,
-    NextJs,
-    NuxtJs,
-    Go,
-    Django,
-    Rails,
-    Rust,
-    Manual,
-}
-
-impl Framework {
-    pub fn display_name(&self) -> &str {
-        match self {
-            Framework::Laravel => "Laravel (PHP)",
-            Framework::NextJs => "Next.js (Node)",
-            Framework::NuxtJs => "Nuxt.js (Node)",
-            Framework::Go => "Go (Golang)",
-            Framework::Django => "Django (Python)",
-            Framework::Rails => "Ruby on Rails",
-            Framework::Rust => "Rust",
-            Framework::Manual => "Manual / Custom",
-        }
-    }
-
-    pub fn default_port(&self) -> &str {
-        match self {
-            Framework::Laravel => "8000",
-            Framework::NextJs => "3000",
-            Framework::NuxtJs => "3000",
-            Framework::Go => "8080",
-            Framework::Django => "8000",
-            Framework::Rails => "3000",
-            Framework::Rust => "8080",
-            Framework::Manual => "80",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct TreeItem {
-    pub path: std::path::PathBuf,
-    pub depth: usize,
-    pub is_dir: bool,
-    pub expanded: bool,
-    pub is_last: bool, // To draw └── vs ├──
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ComposeFile {
-    pub services: std::collections::HashMap<String, ServiceConfig>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct ServiceConfig {
-    #[allow(dead_code)]
-    pub image: Option<String>,
-    #[allow(dead_code)]
-    pub build: Option<serde_yaml::Value>,
-}
-
-#[derive(Clone)]
-pub enum WizardStep {
-    ModeSelection { selected_index: usize },
-    QuickRunInput {
-        image: String,
-        name: String,
-        ports: String,
-        env: String,
-        cpu: String,
-        memory: String,
-        restart: String,
-        show_advanced: bool,
-        focused_field: usize,
-        editing_id: Option<String>,
-        port_status: PortStatus,
-    },
-    FileBrowser {
-        current_path: std::path::PathBuf, // Root of the tree view
-        list_state: ListState,
-        items: Vec<TreeItem>, // Flattened tree items
-        mode: FileBrowserMode,
-    },
-    DockerfileGenerator {
-        path: std::path::PathBuf,
-        detected_framework: Framework,
-        detected_version: String,
-        manual_selection_open: bool,
-        manual_selected_index: usize,
-        port: String,
-        editing_port: bool,
-        focused_option: usize,
-        port_status: PortStatus,
-    },
-    BuildConf {
-        tag: String,
-        mount_volume: bool,
-        focused_field: usize,
-        path: std::path::PathBuf,
-    },
-    Processing {
-        message: String,
-        spinner_frame: usize,
-    },
-    ComposeGenerator {
-        path: std::path::PathBuf,
-    },
-    ComposeServiceSelection {
-        path: std::path::PathBuf,
-        selected_services: Vec<String>,
-        focused_index: usize,
-        all_services: Vec<String>,
-    },
-    ResourceAllocation {
-        path: std::path::PathBuf,
-        services: Vec<String>,
-        all_services: Vec<String>, // Added to support going back
-        cpu_limit: String,
-        mem_limit: String,
-        focused_field: usize,
-        detected_cpu: usize,
-        detected_mem: u64,
-    },
-    Janitor {
-        items: Vec<JanitorItem>,
-        list_state: ListState,
-        loading: bool,
-    },
-    OverwriteConfirm {
-        path: std::path::PathBuf,
-        detected_framework: Framework,
-        detected_version: String,
-        port: String,
-    },
-    Settings {
-        focused_field: usize,
-        temp_config: Config,
-    },
-    Error(String),
-}
-
-#[derive(Clone)]
-pub enum WizardAction {
-    Create { image: String, name: String, ports: String, env: String, cpu: String, memory: String, restart: String },
-    Build { tag: String, path: std::path::PathBuf, mount: bool },
-    ComposeUp { path: std::path::PathBuf, override_path: Option<std::path::PathBuf> },
-    Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String, restart: String },
-    ScanJanitor,
-    CleanJanitor(Vec<JanitorItem>),
-    Close,
-}
 
 #[derive(Clone)]
 pub struct Fish {
@@ -490,276 +304,21 @@ impl App {
         false
     }
 
-    pub fn detect_framework(path: &std::path::Path) -> (Framework, String) {
-        if let Ok(content) = fs::read_to_string(path.join("composer.json")) {
-            if content.contains("laravel/framework") {
-                let version = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    v["require"]["php"].as_str()
-                        .map(|s| s.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric() || *c == '.').collect::<String>())
-                        .unwrap_or("8.2".to_string())
-                } else { "8.2".to_string() };
-                // If empty (e.g. *), fallback
-                let version = if version.is_empty() { "8.2".to_string() } else { version };
-                return (Framework::Laravel, version);
-            }
-        }
-        if let Ok(content) = fs::read_to_string(path.join("package.json")) {
-            let json: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
-            let node_version = json["engines"]["node"].as_str()
-                .map(|s| s.chars().skip_while(|c| !c.is_numeric()).take_while(|c| c.is_numeric()).collect::<String>())
-                .unwrap_or("18".to_string());
-             let node_version = if node_version.is_empty() { "18".to_string() } else { node_version };
 
-            if content.contains("\"next\"") {
-                return (Framework::NextJs, node_version);
-            }
-            if content.contains("\"nuxt\"") {
-                return (Framework::NuxtJs, node_version);
-            }
-        }
-        if path.join("go.mod").exists() {
-            // Parse go version?
-             if let Ok(content) = fs::read_to_string(path.join("go.mod")) {
-                 for line in content.lines() {
-                     if line.starts_with("go ") {
-                         let v = line.trim_start_matches("go ").trim().to_string();
-                         return (Framework::Go, v);
-                     }
-                 }
-             }
-            return (Framework::Go, "1.21".to_string());
-        }
-        if let Ok(content) = fs::read_to_string(path.join("requirements.txt")) {
-            if content.contains("django") {
-                return (Framework::Django, "3.11".to_string()); // Python version default
-            }
-        }
-        if let Ok(content) = fs::read_to_string(path.join("Gemfile")) {
-            if content.contains("rails") {
-                return (Framework::Rails, "3.2".to_string()); // Ruby version default
-            }
-        }
-        if path.join("Cargo.toml").exists() {
-            return (Framework::Rust, "latest".to_string());
-        }
-        
-        (Framework::Manual, "latest".to_string())
-    }
 
-    pub fn check_port(port_input: &str) -> PortStatus {
-        if port_input.is_empty() { return PortStatus::None; }
-        
-        let port_part = if let Some(idx) = port_input.find(':') {
-            &port_input[..idx]
-        } else {
-            port_input
-        };
 
-        if let Ok(port) = port_part.parse::<u16>() {
-            match std::net::TcpListener::bind(("0.0.0.0", port)) {
-                Ok(_) => PortStatus::Available,
-                Err(_) => {
-                    // Port is taken. Try to find who has it.
-                    // Try lsof first
-                    let output = std::process::Command::new("lsof")
-                        .arg("-i")
-                        .arg(&format!(":{}", port))
-                        .arg("-t") // Terse mode, just PIDs
-                        .output();
-                    
-                    if let Ok(o) = output {
-                        if !o.stdout.is_empty() {
-                            let pid_str = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            // If multiple lines, take first
-                            let pid_str = pid_str.lines().next().unwrap_or("");
-                            if let Ok(pid) = pid_str.parse::<i32>() {
-                                // We can use sysinfo here if we had access to self.system, but this is a static/helper method?
-                                // Actually we can just return the PID and let UI resolve it or just return PID.
-                                // Or we can instantiate a temporary System to look it up, but that's heavy.
-                                // Let's just return "PID: <pid>"
-                                // Better: run `ps -p <pid> -o comm=`
-                                let ps_out = std::process::Command::new("ps")
-                                    .arg("-p")
-                                    .arg(pid_str)
-                                    .arg("-o")
-                                    .arg("comm=")
-                                    .output();
-                                if let Ok(ps_o) = ps_out {
-                                    let name = String::from_utf8_lossy(&ps_o.stdout).trim().to_string();
-                                    return PortStatus::Occupied(format!("{} (PID: {})", name, pid));
-                                }
-                                return PortStatus::Occupied(format!("PID: {}", pid));
-                            }
-                        }
-                    }
-                    PortStatus::Occupied("Unknown Process".to_string())
-                }
-            }
-        } else {
-            PortStatus::Invalid
-        }
-    }
 
     // For Scaffolding (Creating new project from scratch)
-    fn generate_new_compose_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<()> {
-        if !path.exists() {
-            std::fs::create_dir_all(path)?;
-        }
-        let mut content = String::from("version: '3.8'\nservices:\n  app:\n    build: .\n    ports:\n      - \"80:80\"\n    restart: always\n");
-        
-        // Add resource limits to app
-        if !cpu.is_empty() || !mem.is_empty() {
-            content.push_str("    deploy:\n      resources:\n        limits:\n");
-            if !cpu.is_empty() {
-                content.push_str(&format!("          cpus: '{}'\n", cpu));
-            }
-            if !mem.is_empty() {
-                content.push_str(&format!("          memory: {}\n", mem));
-            }
-        }
 
-        for svc in services {
-            match svc.as_str() {
-                "MySQL" => {
-                    content.push_str("\n  mysql:\n    image: mysql:8.0\n    environment:\n      MYSQL_ROOT_PASSWORD: root\n      MYSQL_DATABASE: app_db\n    ports:\n      - \"3306:3306\"\n");
-                },
-                "PostgreSQL" => {
-                    content.push_str("\n  postgres:\n    image: postgres:15\n    environment:\n      POSTGRES_USER: user\n      POSTGRES_PASSWORD: password\n      POSTGRES_DB: app_db\n    ports:\n      - \"5432:5432\"\n");
-                },
-                "Redis" => {
-                    content.push_str("\n  redis:\n    image: redis:alpine\n    ports:\n      - \"6379:6379\"\n");
-                    if !cpu.is_empty() {
-                         content.push_str("    deploy:\n      resources:\n        limits:\n          cpus: '0.5'\n          memory: 512M\n");
-                    }
-                },
-                "Nginx" => {
-                    content.push_str("\n  nginx:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"\n    depends_on:\n      - app\n");
-                },
-                _ => {}
-            }
-        }
-
-        std::fs::write(path.join("docker-compose.yml"), content)
-    }
 
     // For Existing Projects (The Merge Strategy)
-    fn generate_override_file(path: &std::path::Path, services: &[String], cpu: &str, mem: &str) -> std::io::Result<std::path::PathBuf> {
-        // Create a minimal struct for override
-        // We construct YAML manually string for simplicity and control
-        let mut content = String::from("version: '3.8'\nservices:\n");
-        
-        for svc in services {
-            content.push_str(&format!("  {}:\n", svc));
-            content.push_str("    deploy:\n      resources:\n        limits:\n");
-            
-            if !cpu.is_empty() {
-                content.push_str(&format!("          cpus: '{}'\n", cpu));
-            }
-            if !mem.is_empty() {
-                content.push_str(&format!("          memory: {}\n", mem));
-            }
-        }
-        
-        let override_path = path.parent().unwrap_or(path).join(".docktop-override.yml");
-        std::fs::write(&override_path, content)?;
-        Ok(override_path)
-    }
 
-    fn detect_resources() -> (usize, u64) {
-        use sysinfo::System;
-        let mut sys = System::new_all();
-        sys.refresh_all();
-        (sys.cpus().len(), sys.total_memory())
-    }
 
-    fn calculate_auto_resources(total_mem: u64, total_cpus: usize) -> (String, String) {
-        // 20% overhead
-        let available_mem = (total_mem as f64 * 0.8) as u64;
-        let app_mem = (available_mem as f64 * 0.4) as u64;
-        
-        // Convert to human readable
-        let mem_str = if app_mem > 1024 * 1024 * 1024 {
-            format!("{}G", app_mem / (1024 * 1024 * 1024))
-        } else {
-            format!("{}M", app_mem / (1024 * 1024))
-        };
 
-        let cpu_str = format!("{:.1}", (total_cpus as f64 * 0.25).max(0.5)); // Give 25% of cores or at least 0.5
 
-        (cpu_str, mem_str)
-    }
 
-    fn write_dockerfile(path: &std::path::Path, framework: &Framework, version: &str, port: &str) -> std::io::Result<()> {
-        let content = match framework {
-            Framework::Laravel => format!(r#"# Generated by DockTop for Laravel (PHP {})
-FROM php:{}-fpm
 
-RUN apt-get update && apt-get install -y git curl libpng-dev libonig-dev libxml2-dev zip unzip
-RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-WORKDIR /var/www
-COPY . .
-RUN composer install
-
-CMD php artisan serve --host=0.0.0.0 --port={}
-EXPOSE {}
-"#, version, version, port, port),
-            Framework::NextJs => format!(r#"# Generated by DockTop for Next.js (Node {})
-FROM node:{}-alpine AS base
-
-FROM base AS deps
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci
-
-FROM base AS builder
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
-
-FROM base AS runner
-WORKDIR /app
-ENV NODE_ENV production
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-
-EXPOSE {}
-CMD ["node", "server.js"]
-"#, version, version, port),
-            Framework::Go => format!(r#"# Generated by DockTop for Go (Go {})
-FROM golang:{}-alpine
-
-WORKDIR /app
-COPY go.mod ./
-COPY go.sum ./
-RUN go mod download
-
-COPY . .
-RUN go build -o /main
-
-EXPOSE {}
-CMD ["/main"]
-"#, version, version, port),
-            Framework::Rust => format!(r#"# Generated by DockTop for Rust
-FROM rust:{}-alpine as builder
-WORKDIR /usr/src/app
-COPY . .
-RUN cargo install --path .
-
-FROM alpine:latest
-COPY --from=builder /usr/local/cargo/bin/app /usr/local/bin/app
-EXPOSE {}
-CMD ["app"]
-"#, version, port),
-            _ => format!("FROM alpine\nWORKDIR /app\nCOPY . .\nEXPOSE {}\nCMD [\"/app/main\"]", port),
-        };
-        
-        fs::write(path.join("Dockerfile"), content)?;
-        Ok(())
-    }
 
     pub fn wizard_handle_key(&mut self, key_event: crossterm::event::KeyEvent) -> Option<WizardAction> {
         let key = key_event.code;
@@ -769,6 +328,9 @@ CMD ["app"]
         let mut wizard_action = None;
 
         if let Some(wizard) = &mut self.wizard {
+            if key == KeyCode::Char('w') {
+                return Some(WizardAction::Close);
+            }
             match &mut wizard.step {
                 WizardStep::ModeSelection { selected_index } => {
                     match key {
@@ -787,7 +349,8 @@ CMD ["app"]
                                     show_advanced: false,
                                     focused_field: 0,
                                     editing_id: None,
-                                    port_status: PortStatus::None,
+                                    port_status: crate::wizard::models::PortStatus::None,
+                                    profile: crate::wizard::models::ResourceProfile::Custom,
                                 });
                             } else if *selected_index == 3 {
                                 let mut state = ListState::default();
@@ -825,21 +388,33 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status } => {
+                WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status, profile } => {
                     match key {
                         KeyCode::Down | KeyCode::Tab => {
-                            let max_fields = if *show_advanced { 7 } else { 4 }; // 0-3 are basic, 4-6 are advanced
+                            let max_fields = if *show_advanced { 8 } else { 4 }; // 0-3 basic, 4-7 advanced
                             *focused_field = (*focused_field + 1) % max_fields;
                         }
                         KeyCode::Up | KeyCode::BackTab => {
-                            let max_fields = if *show_advanced { 7 } else { 4 };
+                            let max_fields = if *show_advanced { 8 } else { 4 };
                             if *focused_field > 0 {
                                 *focused_field -= 1;
                             } else {
                                 *focused_field = max_fields - 1;
                             }
                         }
-                        KeyCode::Char(' ') if *focused_field == 6 => {
+                        KeyCode::Char(' ') if *focused_field == 4 => {
+                             // Cycle Profile
+                             *profile = match profile {
+                                 crate::wizard::models::ResourceProfile::Eco => crate::wizard::models::ResourceProfile::Standard,
+                                 crate::wizard::models::ResourceProfile::Standard => crate::wizard::models::ResourceProfile::Performance,
+                                 crate::wizard::models::ResourceProfile::Performance => crate::wizard::models::ResourceProfile::Custom,
+                                 crate::wizard::models::ResourceProfile::Custom => crate::wizard::models::ResourceProfile::Eco,
+                             };
+                             let (new_cpu, new_mem) = profile.values();
+                             if !new_cpu.is_empty() { *cpu = new_cpu; }
+                             if !new_mem.is_empty() { *memory = new_mem; }
+                        }
+                        KeyCode::Char(' ') if *focused_field == 7 => {
                              // Cycle restart policies
                              *restart = match restart.as_str() {
                                  "no" => "always".to_string(),
@@ -848,59 +423,47 @@ CMD ["app"]
                                  _ => "no".to_string(),
                              };
                         }
-                        KeyCode::Char('a') if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) || *focused_field > 100 => { // Hacky way to detect advanced toggle? No, let's use a specific key or field.
-                             // Actually, let's just use a hotkey 'A' to toggle advanced?
-                             // Or maybe just 'Tab' eventually reaches a "Show Advanced" button?
-                             // Let's make 'Ctrl+a' toggle advanced
+                        KeyCode::Char('a') if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                              *show_advanced = !*show_advanced;
                              if !*show_advanced && *focused_field >= 4 {
                                  *focused_field = 0;
                              }
                         }
                         KeyCode::Char(c) => {
-                            let target = match *focused_field {
-                                0 => image,
-                                1 => name,
-                                2 => ports,
-                                3 => env,
-                                4 => cpu,
-                                5 => memory,
-                                // 6 is restart, handled by Space
-                                _ => image,
-                            };
-                            if *focused_field != 6 {
-                                target.push(c);
+                            if *focused_field == 5 || *focused_field == 6 {
+                                *profile = crate::wizard::models::ResourceProfile::Custom;
                             }
+                            
+                            if *focused_field == 0 { image.push(c); }
+                            else if *focused_field == 1 { name.push(c); }
+                            else if *focused_field == 2 { ports.push(c); }
+                            else if *focused_field == 3 { env.push(c); }
+                            else if *focused_field == 5 { cpu.push(c); }
+                            else if *focused_field == 6 { memory.push(c); }
+                            
                             if *focused_field == 2 {
-                                *port_status = Self::check_port(ports);
+                                *port_status = crate::wizard::logic::check_port(&ports);
                             }
                         }
                         KeyCode::Backspace => {
-                            let target = match *focused_field {
-                                0 => image,
-                                1 => name,
-                                2 => ports,
-                                3 => env,
-                                4 => cpu,
-                                5 => memory,
-                                // 6 is restart
-                                _ => image,
-                            };
-                            if *focused_field != 6 {
-                                target.pop();
+                            if *focused_field == 5 || *focused_field == 6 {
+                                *profile = crate::wizard::models::ResourceProfile::Custom;
                             }
+                            
+                            if *focused_field == 0 { image.pop(); }
+                            else if *focused_field == 1 { name.pop(); }
+                            else if *focused_field == 2 { ports.pop(); }
+                            else if *focused_field == 3 { env.pop(); }
+                            else if *focused_field == 5 { cpu.pop(); }
+                            else if *focused_field == 6 { memory.pop(); }
+                            
                             if *focused_field == 2 {
-                                *port_status = Self::check_port(ports);
+                                *port_status = crate::wizard::logic::check_port(&ports);
                             }
                         }
                         KeyCode::Enter => {
-                            next_step = Some(WizardStep::Processing {
-                                message: if editing_id.is_some() { "Replacing container..." } else { "Creating container..." }.to_string(),
-                                spinner_frame: 0,
-                            });
-                            if let Some(old_id) = editing_id {
-                                action_msg = Some(format!("Replacing container {}", old_id));
-                                wizard_action = Some(WizardAction::Replace {
+                            let action = if let Some(old_id) = editing_id {
+                                WizardAction::Replace {
                                     old_id: old_id.clone(),
                                     image: image.clone(),
                                     name: name.clone(),
@@ -909,10 +472,9 @@ CMD ["app"]
                                     cpu: cpu.clone(),
                                     memory: memory.clone(),
                                     restart: restart.clone(),
-                                });
+                                }
                             } else {
-                                action_msg = Some(format!("Creating container from {}", image));
-                                wizard_action = Some(WizardAction::Create {
+                                WizardAction::Create {
                                     image: image.clone(),
                                     name: name.clone(),
                                     ports: ports.clone(),
@@ -920,8 +482,38 @@ CMD ["app"]
                                     cpu: cpu.clone(),
                                     memory: memory.clone(),
                                     restart: restart.clone(),
-                                });
-                            }
+                                }
+                            };
+
+                            let mut cmd = format!("docker run -d --name {}", name);
+                            if !ports.is_empty() { cmd.push_str(&format!(" -p {}", ports)); }
+                            if !env.is_empty() { cmd.push_str(&format!(" -e {}", env)); }
+                            if !cpu.is_empty() { cmd.push_str(&format!(" --cpus {}", cpu)); }
+                            if !memory.is_empty() { cmd.push_str(&format!(" --memory {}", memory)); }
+                            if !restart.is_empty() && restart != "no" { cmd.push_str(&format!(" --restart {}", restart)); }
+                            cmd.push_str(&format!(" {}", image));
+
+                            let prev = crate::wizard::models::WizardStep::QuickRunInput {
+                                image: image.clone(),
+                                name: name.clone(),
+                                ports: ports.clone(),
+                                env: env.clone(),
+                                cpu: cpu.clone(),
+                                memory: memory.clone(),
+                                restart: restart.clone(),
+                                show_advanced: *show_advanced,
+                                focused_field: *focused_field,
+                                editing_id: editing_id.clone(),
+                                port_status: port_status.clone(),
+                                profile: profile.clone(),
+                            };
+
+                            next_step = Some(WizardStep::Preview {
+                                title: "Preview Command".to_string(),
+                                content: cmd,
+                                action,
+                                previous_step: Box::new(prev),
+                            });
                         }
                         _ => {}
                     }
@@ -949,7 +541,7 @@ CMD ["app"]
                                 let path = item.path.clone();
                                 
                                 if *mode == FileBrowserMode::Build {
-                                    let (framework, version) = Self::detect_framework(&path); // Pass path directly
+                                    let (framework, version) = crate::wizard::logic::detect_framework(&path); // Pass path directly
                                     next_step = Some(WizardStep::DockerfileGenerator {
                                         path: path.clone(),
                                         detected_framework: framework.clone(),
@@ -1067,11 +659,11 @@ CMD ["app"]
                           match key {
                               KeyCode::Char(c) => {
                                   port.push(c);
-                                  *port_status = Self::check_port(port);
+                                  *port_status = crate::wizard::logic::check_port(port);
                               },
                               KeyCode::Backspace => { 
                                   port.pop(); 
-                                  *port_status = Self::check_port(port);
+                                  *port_status = crate::wizard::logic::check_port(port);
                               },
                              KeyCode::Enter | KeyCode::Esc => *editing_port = false,
                              _ => {}
@@ -1096,7 +688,7 @@ CMD ["app"]
                                                  port: port.clone(),
                                              });
                                          } else {
-                                             if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                                             if let Ok(_) = crate::wizard::logic::write_dockerfile(path, detected_framework, detected_version, port) {
                                                  next_step = Some(WizardStep::BuildConf {
                                                      tag: "my-app:latest".to_string(),
                                                      mount_volume: false,
@@ -1128,7 +720,7 @@ CMD ["app"]
                                          port: port.clone(),
                                      });
                                  } else {
-                                     if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                                     if let Ok(_) = crate::wizard::logic::write_dockerfile(path, detected_framework, detected_version, port) {
                                          next_step = Some(WizardStep::BuildConf {
                                              tag: "my-app:latest".to_string(),
                                              mount_volume: false,
@@ -1166,7 +758,7 @@ CMD ["app"]
                         KeyCode::Enter | KeyCode::Char('y') => {
                              // Backup
                              let _ = std::fs::rename(path.join("Dockerfile"), path.join("Dockerfile.bak"));
-                             if let Ok(_) = Self::write_dockerfile(path, detected_framework, detected_version, port) {
+                             if let Ok(_) = crate::wizard::logic::write_dockerfile(path, detected_framework, detected_version, port) {
                                   next_step = Some(WizardStep::BuildConf {
                                       tag: "my-app:latest".to_string(),
                                       mount_volume: false,
@@ -1195,7 +787,7 @@ CMD ["app"]
                 }
                 WizardStep::Settings { focused_field, temp_config } => {
                 match key {
-                    KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 } else { *focused_field = 3 },
+                    KeyCode::Up => if *focused_field > 0 { *focused_field = 3 } else { *focused_field = 3 },
                     KeyCode::Down => *focused_field = (*focused_field + 1) % 4,
                     KeyCode::Left | KeyCode::Right => {
                         if *focused_field == 0 {
@@ -1319,7 +911,7 @@ CMD ["app"]
                             }
                         }
                         KeyCode::Enter => {
-                            let (cpu, mem) = Self::detect_resources();
+                            let (cpu, mem) = crate::wizard::logic::detect_resources();
                             next_step = Some(WizardStep::ResourceAllocation {
                                 path: path.clone(),
                                 services: selected_services.clone(),
@@ -1329,6 +921,7 @@ CMD ["app"]
                                 focused_field: 0,
                                 detected_cpu: cpu,
                                 detected_mem: mem,
+                                profile: crate::wizard::models::ResourceProfile::Standard,
                             });
                         }
                         KeyCode::Esc => {
@@ -1337,20 +930,33 @@ CMD ["app"]
                         _ => {}
                     }
                 }
-                WizardStep::ResourceAllocation { path, services, all_services, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem } => {
+                WizardStep::ResourceAllocation { path, services, all_services, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem, profile } => {
                      match key {
                         KeyCode::Up => if *focused_field > 0 { *focused_field -= 1 },
-                        KeyCode::Down | KeyCode::Tab => if *focused_field < 2 { *focused_field += 1 },
+                        KeyCode::Down | KeyCode::Tab => if *focused_field < 3 { *focused_field += 1 },
+                        KeyCode::Char(' ') if *focused_field == 0 => {
+                             // Cycle Profile
+                             *profile = match profile {
+                                 crate::wizard::models::ResourceProfile::Eco => crate::wizard::models::ResourceProfile::Standard,
+                                 crate::wizard::models::ResourceProfile::Standard => crate::wizard::models::ResourceProfile::Performance,
+                                 crate::wizard::models::ResourceProfile::Performance => crate::wizard::models::ResourceProfile::Custom,
+                                 crate::wizard::models::ResourceProfile::Custom => crate::wizard::models::ResourceProfile::Eco,
+                             };
+                             let (new_cpu, new_mem) = profile.values();
+                             if !new_cpu.is_empty() { *cpu_limit = new_cpu; }
+                             if !new_mem.is_empty() { *mem_limit = new_mem; }
+                        }
                         KeyCode::Char('s') => {
-                            let (auto_cpu, auto_mem) = Self::calculate_auto_resources(*detected_mem, *detected_cpu);
+                            let (auto_cpu, auto_mem) = crate::wizard::logic::calculate_auto_resources(*detected_mem, *detected_cpu);
+                            *cpu_limit = auto_cpu;
+                            *mem_limit = auto_mem;
+                            *profile = crate::wizard::models::ResourceProfile::Custom;
                             
                             let res = if path.is_file() {
-                                // Existing project: Generate override
-                                Self::generate_override_file(path, services, &auto_cpu, &auto_mem).map(Some)
+                                crate::wizard::logic::generate_override_file(path, services, cpu_limit, mem_limit).map(Some)
                                     .map_err(|_| "Failed to write override file".to_string())
                             } else {
-                                // New project: Generate full file
-                                Self::generate_new_compose_file(path, services, &auto_cpu, &auto_mem)
+                                crate::wizard::logic::generate_new_compose_file(path, services, cpu_limit, mem_limit)
                                     .map(|_| None)
                                     .map_err(|_| "Failed to write docker-compose.yml".to_string())
                             };
@@ -1373,49 +979,62 @@ CMD ["app"]
                             }
                         }
                         KeyCode::Enter => {
-                            if *focused_field == 2 {
-                                let res = if path.is_file() {
+                            if *focused_field == 3 {
+                                let (content, override_path) = if path.is_file() {
                                     // Existing project
-                                    Self::generate_override_file(path, services, cpu_limit, mem_limit).map(Some)
-                                        .map_err(|_| "Failed to write override file".to_string())
+                                    let content = crate::wizard::logic::generate_override_content(services, cpu_limit, mem_limit);
+                                    let p = path.parent().unwrap_or(path).join(".docktop-override.yml");
+                                    (content, Some(p))
                                 } else {
                                     // New project
-                                    Self::generate_new_compose_file(path, services, cpu_limit, mem_limit)
-                                        .map(|_| None)
-                                        .map_err(|_| "Failed to write docker-compose.yml".to_string())
+                                    let content = crate::wizard::logic::generate_new_compose_content(services, cpu_limit, mem_limit);
+                                    (content, None)
                                 };
 
-                                match res {
-                                    Ok(override_path) => {
-                                        next_step = Some(WizardStep::Processing {
-                                            message: "Running Docker Compose...".to_string(),
-                                            spinner_frame: 0,
-                                        });
-                                        action_msg = Some("Running docker compose up".to_string());
-                                        wizard_action = Some(WizardAction::ComposeUp {
-                                            path: path.clone(),
-                                            override_path,
-                                        });
-                                    }
-                                    Err(msg) => {
-                                        next_step = Some(WizardStep::Error(msg));
-                                    }
-                                }
+                                let action = WizardAction::ComposeUp {
+                                    path: path.clone(),
+                                    override_path: override_path.clone(),
+                                };
+                                
+                                let prev = crate::wizard::models::WizardStep::ResourceAllocation {
+                                    path: path.clone(),
+                                    services: services.clone(),
+                                    all_services: all_services.clone(),
+                                    cpu_limit: cpu_limit.clone(),
+                                    mem_limit: mem_limit.clone(),
+                                    focused_field: *focused_field,
+                                    detected_cpu: *detected_cpu,
+                                    detected_mem: *detected_mem,
+                                    profile: profile.clone(),
+                                };
+
+                                next_step = Some(WizardStep::Preview {
+                                    title: "Preview Docker Compose".to_string(),
+                                    content,
+                                    action,
+                                    previous_step: Box::new(prev),
+                                });
                             } else {
                                 *focused_field += 1;
                             }
                         }
                         KeyCode::Char(c) => {
-                            if *focused_field == 0 {
+                            if *focused_field == 1 || *focused_field == 2 {
+                                *profile = crate::wizard::models::ResourceProfile::Custom;
+                            }
+                            if *focused_field == 1 {
                                 cpu_limit.push(c);
-                            } else if *focused_field == 1 {
+                            } else if *focused_field == 2 {
                                 mem_limit.push(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            if *focused_field == 0 {
+                            if *focused_field == 1 || *focused_field == 2 {
+                                *profile = crate::wizard::models::ResourceProfile::Custom;
+                            }
+                            if *focused_field == 1 {
                                 cpu_limit.pop();
-                            } else if *focused_field == 1 {
+                            } else if *focused_field == 2 {
                                 mem_limit.pop();
                             }
                         }
@@ -1429,6 +1048,41 @@ CMD ["app"]
                         }
                         _ => {}
                      }
+                }
+                WizardStep::Preview { title: _, content, action, previous_step } => {
+                    match key {
+                        KeyCode::Enter => {
+                            if let WizardAction::ComposeUp { path, override_path } = &action {
+                                 let res = if let Some(p) = override_path {
+                                     std::fs::write(p, content).map_err(|e| format!("Failed to write: {}", e))
+                                 } else {
+                                     std::fs::write(path.join("docker-compose.yml"), content).map_err(|e| format!("Failed to write: {}", e))
+                                 };
+                                 
+                                 if let Err(msg) = res {
+                                     next_step = Some(WizardStep::Error(msg));
+                                 } else {
+                                     next_step = Some(WizardStep::Processing {
+                                         message: "Executing...".to_string(),
+                                         spinner_frame: 0,
+                                     });
+                                     action_msg = Some("Executing action...".to_string());
+                                     wizard_action = Some(action.clone());
+                                 }
+                            } else {
+                                next_step = Some(WizardStep::Processing {
+                                    message: "Executing...".to_string(),
+                                    spinner_frame: 0,
+                                });
+                                action_msg = Some("Executing action...".to_string());
+                                wizard_action = Some(action.clone());
+                            }
+                        }
+                        KeyCode::Esc => {
+                            next_step = Some(*previous_step.clone());
+                        }
+                        _ => {}
+                    }
                 }
                 WizardStep::BuildConf { tag, mount_volume, focused_field, path } => {
                     match key {

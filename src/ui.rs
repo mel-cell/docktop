@@ -381,7 +381,7 @@ fn draw_container_section(f: &mut Frame, app: &mut App, area: Rect, theme: &Them
 
         let mut wizard_in_main = false;
         if let Some(wizard) = &app.wizard {
-            if let crate::app::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
+            if let crate::wizard::models::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
                 if editing_id.is_some() {
                     wizard_in_main = true;
                 }
@@ -484,7 +484,7 @@ fn draw_container_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme)
 
 fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if let Some(wizard) = &app.wizard {
-        let is_edit = if let crate::app::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
+        let is_edit = if let crate::wizard::models::WizardStep::QuickRunInput { editing_id, .. } = &wizard.step {
             editing_id.is_some()
         } else {
             false
@@ -544,8 +544,14 @@ fn draw_container_sidebar(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
 }
 
-fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, theme: &Theme) {
-    let title = if matches!(wizard.step, crate::app::WizardStep::ModeSelection { .. }) {
+fn draw_wizard(f: &mut Frame, wizard: &crate::wizard::models::WizardState, area: Rect, theme: &Theme) {
+    // Use a centered rect for the wizard to make it look like a modal
+    let area = centered_rect(70, 70, area);
+    
+    // Clear the area behind the modal so it stands out
+    f.render_widget(Clear, area);
+
+    let title = if matches!(wizard.step, crate::wizard::models::WizardStep::ModeSelection { .. }) {
         " TOOLS - WIZARD "
     } else {
         " WIZARD "
@@ -553,15 +559,16 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .title(title);
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(theme.selection_bg))
+        .style(Style::default().bg(theme.background))
+        .title(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
     
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     match &wizard.step {
-        crate::app::WizardStep::ModeSelection { selected_index } => {
+        crate::wizard::models::WizardStep::ModeSelection { selected_index } => {
             let options = [
                 (">_ Quick Pull & Run", "Pull from registry and run immediately"),
                 ("./ Build from Source", "Build Dockerfile from local directory"),
@@ -597,21 +604,20 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let help = Paragraph::new("UP/DOWN: Navigate | ENTER: Select | ESC: Cancel").style(Style::default().fg(theme.border));
             f.render_widget(help, help_area[1]);
         },
-        crate::app::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status } => {
+        crate::wizard::models::WizardStep::QuickRunInput { image, name, ports, env, cpu, memory, restart, show_advanced, focused_field, editing_id, port_status, profile } => {
             let title = if editing_id.is_some() { "Edit Container" } else { "Quick Pull & Run" };
+            
+            // Calculate constraints based on visible fields
+            let mut constraints = vec![Constraint::Length(1)]; // Title
+            constraints.extend(vec![Constraint::Length(3); 4]); // Basic fields
+            if *show_advanced {
+                constraints.extend(vec![Constraint::Length(3); 4]); // Advanced fields (Profile, CPU, Mem, Restart)
+            }
+            constraints.push(Constraint::Min(1)); // Help
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Min(1),
-                ])
+                .constraints(constraints)
                 .split(inner);
 
             let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
@@ -624,7 +630,10 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 ("Env Vars (KEY=VAL)", env),
             ];
 
+            let profile_str = profile.display_name().to_string();
+
             if *show_advanced {
+                fields.push(("Resource Profile (Space to cycle)", &profile_str));
                 fields.push(("CPU Limit (e.g. 0.5)", cpu));
                 fields.push(("Memory Limit (e.g. 512m)", memory));
                 fields.push(("Restart Policy (Space to cycle)", restart));
@@ -639,9 +648,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 let mut title_text = label.to_string();
                 if i == 2 { // Ports field
                     match port_status {
-                        crate::app::PortStatus::Available => title_text.push_str(" [OK]"),
-                        crate::app::PortStatus::Occupied(who) => title_text.push_str(&format!(" [BUSY: {}]", who)),
-                        crate::app::PortStatus::Invalid => title_text.push_str(" [INVALID]"),
+                        crate::wizard::models::PortStatus::Available => title_text.push_str(" [OK]"),
+                        crate::wizard::models::PortStatus::Occupied(who) => title_text.push_str(&format!(" [BUSY: {}]", who)),
+                        crate::wizard::models::PortStatus::Invalid => title_text.push_str(" [INVALID]"),
                         _ => {}
                     }
                 }
@@ -652,17 +661,18 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             }
             
             let help_text = if *show_advanced {
-                "ENTER: Create/Update | TAB: Next Field | SPACE: Toggle Restart"
+                "ENTER: Create/Update | TAB: Next Field | SPACE: Cycle Options"
             } else {
                 "ENTER: Create/Update | TAB: Next Field | Ctrl+A: Advanced Options"
             };
             let help = Paragraph::new(help_text).style(Style::default().fg(theme.border));
-            f.render_widget(help, chunks[8]);
+            // Help is always the last chunk
+            f.render_widget(help, *chunks.last().unwrap());
         },
-        crate::app::WizardStep::FileBrowser { current_path, list_state, items, mode } => {
+        crate::wizard::models::WizardStep::FileBrowser { current_path, list_state, items, mode } => {
              let title = match mode {
-                 crate::app::FileBrowserMode::Build => "Select Project (Dockerfile)",
-                 crate::app::FileBrowserMode::Compose => "Select Compose File",
+                 crate::wizard::models::FileBrowserMode::Build => "Select Project (Dockerfile)",
+                 crate::wizard::models::FileBrowserMode::Compose => "Select Compose File",
              };
              
              let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, item)| {
@@ -724,8 +734,8 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
              }).collect();
 
              let instructions = match mode {
-                 crate::app::FileBrowserMode::Build => " ENTER: Expand/Select | SPACE: Detect | BACKSPACE: Go Up ",
-                 crate::app::FileBrowserMode::Compose => " ENTER: Expand/Select | SPACE: Generate | BACKSPACE: Go Up ",
+                 crate::wizard::models::FileBrowserMode::Build => " ENTER: Expand/Select | SPACE: Detect | BACKSPACE: Go Up ",
+                 crate::wizard::models::FileBrowserMode::Compose => " ENTER: Expand/Select | SPACE: Generate | BACKSPACE: Go Up ",
              };
 
              let list = List::new(list_items)
@@ -738,7 +748,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
              let mut state = list_state.clone();
              f.render_stateful_widget(list, inner, &mut state);
         },
-        crate::app::WizardStep::DockerfileGenerator { path, detected_framework, detected_version, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
+        crate::wizard::models::WizardStep::DockerfileGenerator { path, detected_framework, detected_version, manual_selection_open, manual_selected_index, port, editing_port, focused_option, port_status } => {
              let title = " Dockerfile Generator ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -760,7 +770,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
 
             let framework_style = if *focused_option == 0 {
                 Style::default().fg(theme.selection_fg).bg(theme.selection_bg)
-            } else if *detected_framework == crate::app::Framework::Manual {
+            } else if *detected_framework == crate::wizard::models::Framework::Manual {
                 Style::default().fg(theme.stopped) // Red
             } else {
                 Style::default().fg(theme.running) // Green
@@ -773,9 +783,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let port_style = if *editing_port || *focused_option == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let mut port_title = "Port (Press 'p' to edit)".to_string();
             match port_status {
-                crate::app::PortStatus::Available => port_title.push_str(" [OK]"),
-                crate::app::PortStatus::Occupied(who) => port_title.push_str(&format!(" [BUSY: {}]", who)),
-                crate::app::PortStatus::Invalid => port_title.push_str(" [INVALID]"),
+                crate::wizard::models::PortStatus::Available => port_title.push_str(" [OK]"),
+                crate::wizard::models::PortStatus::Occupied(who) => port_title.push_str(&format!(" [BUSY: {}]", who)),
+                crate::wizard::models::PortStatus::Invalid => port_title.push_str(" [INVALID]"),
                 _ => {}
             }
 
@@ -809,14 +819,14 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 f.render_widget(block.clone(), area);
                 
                 let frameworks = [
-                    crate::app::Framework::Laravel,
-                    crate::app::Framework::NextJs,
-                    crate::app::Framework::NuxtJs,
-                    crate::app::Framework::Go,
-                    crate::app::Framework::Django,
-                    crate::app::Framework::Rails,
-                    crate::app::Framework::Rust,
-                    crate::app::Framework::Manual,
+                    crate::wizard::models::Framework::Laravel,
+                    crate::wizard::models::Framework::NextJs,
+                    crate::wizard::models::Framework::NuxtJs,
+                    crate::wizard::models::Framework::Go,
+                    crate::wizard::models::Framework::Django,
+                    crate::wizard::models::Framework::Rails,
+                    crate::wizard::models::Framework::Rust,
+                    crate::wizard::models::Framework::Manual,
                 ];
                 
                 let list_items: Vec<ListItem> = frameworks.iter().enumerate().map(|(i, fw)| {
@@ -833,7 +843,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 f.render_widget(list, inner_area);
             }
         },
-        crate::app::WizardStep::ComposeGenerator { path } => {
+        crate::wizard::models::WizardStep::ComposeGenerator { path } => {
             let title = " Compose Generator ";
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -865,7 +875,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
-        crate::app::WizardStep::ComposeServiceSelection { path, selected_services, focused_index, all_services } => {
+        crate::wizard::models::WizardStep::ComposeServiceSelection { path, selected_services, focused_index, all_services } => {
             let title = " Review Services ";
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -912,12 +922,13 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
-        crate::app::WizardStep::ResourceAllocation { path: _, services: _, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem, all_services: _ } => {
+        crate::wizard::models::WizardStep::ResourceAllocation { path: _, services: _, cpu_limit, mem_limit, focused_field, detected_cpu, detected_mem, all_services: _, profile } => {
              let title = " Resource Allocation ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // Title
+                    Constraint::Length(3), // Profile
                     Constraint::Length(3), // CPU
                     Constraint::Length(3), // Mem
                     Constraint::Min(1),    // Info
@@ -928,16 +939,21 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let title_p = Paragraph::new(title).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
             f.render_widget(title_p, chunks[0]);
 
-            let cpu_style = if *focused_field == 0 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
+            let profile_style = if *focused_field == 0 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
+            let profile_p = Paragraph::new(profile.display_name())
+                .block(Block::default().borders(Borders::ALL).title("Resource Profile (Space to cycle)").border_style(profile_style));
+            f.render_widget(profile_p, chunks[1]);
+
+            let cpu_style = if *focused_field == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let cpu_p = Paragraph::new(cpu_limit.as_str())
                 .block(Block::default().borders(Borders::ALL).title(format!("CPU Limit (Cores) - Detected: {}", detected_cpu)).border_style(cpu_style));
-            f.render_widget(cpu_p, chunks[1]);
+            f.render_widget(cpu_p, chunks[2]);
 
             let mem_gb = *detected_mem as f64 / (1024.0 * 1024.0 * 1024.0);
-            let mem_style = if *focused_field == 1 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
+            let mem_style = if *focused_field == 2 { Style::default().fg(theme.selection_fg).bg(theme.selection_bg) } else { Style::default().fg(theme.border) };
             let mem_p = Paragraph::new(mem_limit.as_str())
                 .block(Block::default().borders(Borders::ALL).title(format!("Memory Limit - Detected: {:.1} GB", mem_gb)).border_style(mem_style));
-            f.render_widget(mem_p, chunks[2]);
+            f.render_widget(mem_p, chunks[3]);
 
             let info_text = vec![
                 Line::from(""),
@@ -945,7 +961,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 Line::from("Leave empty or press [s] to allow DockTop to calculate"),
                 Line::from("optimal resources automatically based on your hardware."),
                 Line::from(""),
-                Line::from(if *focused_field == 2 {
+                Line::from(if *focused_field == 3 {
                     Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(theme.running).bg(theme.background))
                 } else {
                     Span::styled("[ Generate docker-compose.yml ]", Style::default().fg(theme.foreground))
@@ -953,13 +969,13 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             ];
             let info_p = Paragraph::new(info_text)
                 .block(Block::default().borders(Borders::ALL).title("Info").border_style(Style::default().fg(theme.border)));
-            f.render_widget(info_p, chunks[3]);
+            f.render_widget(info_p, chunks[4]);
 
-            let help = Paragraph::new("UP/DOWN: Navigate | S: Auto-Calculate | ENTER: Next/Generate | ESC: Back")
+            let help = Paragraph::new("UP/DOWN: Navigate | SPACE: Cycle Profile | S: Auto-Calculate | ENTER: Next/Generate | ESC: Back")
                 .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
-            f.render_widget(help, chunks[4]);
+            f.render_widget(help, chunks[5]);
         },
-        crate::app::WizardStep::OverwriteConfirm { path, detected_framework: _, detected_version: _, port: _ } => {
+        crate::wizard::models::WizardStep::OverwriteConfirm { path, detected_framework: _, detected_version: _, port: _ } => {
              let block = Block::default()
                 .title(" ⚠️  WARNING: File Exists ")
                 .borders(Borders::ALL)
@@ -993,7 +1009,29 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             
             f.render_widget(p, inner);
         },
-        crate::app::WizardStep::Janitor { items, list_state, loading } => {
+        crate::wizard::models::WizardStep::Preview { title, content, action: _, previous_step: _ } => {
+             let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title
+                    Constraint::Min(1),    // Content
+                    Constraint::Length(1), // Help
+                ])
+                .split(inner);
+
+            let title_p = Paragraph::new(title.as_str()).style(Style::default().fg(theme.header_fg).add_modifier(Modifier::BOLD));
+            f.render_widget(title_p, chunks[0]);
+
+            let content_p = Paragraph::new(content.as_str())
+                .block(Block::default().borders(Borders::ALL).title(" Preview ").border_style(Style::default().fg(theme.border)))
+                .wrap(Wrap { trim: false });
+            f.render_widget(content_p, chunks[1]);
+
+            let help = Paragraph::new("ENTER: Confirm & Execute | ESC: Back")
+                .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
+            f.render_widget(help, chunks[2]);
+        },
+        crate::wizard::models::WizardStep::Janitor { items, list_state, loading } => {
              let title = " Janitor - Cleanup ";
              let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -1015,9 +1053,9 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, item)| {
                     let check = if item.selected { "[x]" } else { "[ ]" };
                     let kind_str = match item.kind {
-                        crate::app::JanitorItemKind::Image => IconSet::IMAGE,
-                        crate::app::JanitorItemKind::Volume => IconSet::VOLUME,
-                        crate::app::JanitorItemKind::Container => IconSet::CONTAINER,
+                        crate::wizard::models::JanitorItemKind::Image => IconSet::IMAGE,
+                        crate::wizard::models::JanitorItemKind::Volume => IconSet::VOLUME,
+                        crate::wizard::models::JanitorItemKind::Container => IconSet::CONTAINER,
                     };
                     
                     let size_str = if item.size > 0 {
@@ -1064,7 +1102,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 .style(Style::default().fg(theme.border).add_modifier(Modifier::ITALIC));
             f.render_widget(help, chunks[3]);
         },
-        crate::app::WizardStep::BuildConf { tag, mount_volume, focused_field, .. } => {
+        crate::wizard::models::WizardStep::BuildConf { tag, mount_volume, focused_field, .. } => {
              let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)])
@@ -1084,7 +1122,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 .style(Style::default().fg(theme.border));
             f.render_widget(help, layout[2]);
         },
-        crate::app::WizardStep::Processing { message, .. } => {
+        crate::wizard::models::WizardStep::Processing { message, .. } => {
             let text = vec![
                 Line::from(""),
                 Line::from(Span::styled(message, Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD))),
@@ -1096,7 +1134,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
                 .wrap(Wrap { trim: true });
             f.render_widget(p, inner);
         },
-        crate::app::WizardStep::Error(msg) => {
+        crate::wizard::models::WizardStep::Error(msg) => {
              let text = vec![
                 Line::from(Span::styled("Error:", Style::default().fg(theme.stopped).add_modifier(Modifier::BOLD))),
                 Line::from(Span::styled(msg, Style::default().fg(theme.foreground))),
@@ -1106,7 +1144,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::app::WizardState, area: Rect, them
             let p = Paragraph::new(text).wrap(Wrap { trim: true });
             f.render_widget(p, inner);
         },
-        crate::app::WizardStep::Settings { focused_field, temp_config } => {
+        crate::wizard::models::WizardStep::Settings { focused_field, temp_config } => {
              let layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([

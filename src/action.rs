@@ -1,4 +1,4 @@
-use crate::app;
+use crate::wizard::models;
 use bollard::Docker;
 use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions, ListImagesOptions, ListVolumesOptions, ListContainersOptions, RemoveImageOptions, RemoveVolumeOptions};
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
@@ -35,7 +35,7 @@ pub enum Action {
         restart: String, // Added restart policy
     },
     ScanJanitor,
-    CleanJanitor(Vec<app::JanitorItem>),
+    CleanJanitor(Vec<models::JanitorItem>),
     Delete(String),
     RefreshContainers,
 }
@@ -43,7 +43,7 @@ pub enum Action {
 pub async fn run_action_loop(
     mut rx_action: mpsc::Receiver<Action>,
     tx_action_result: mpsc::Sender<String>,
-    tx_janitor_items: mpsc::Sender<Vec<app::JanitorItem>>,
+    tx_janitor_items: mpsc::Sender<Vec<models::JanitorItem>>,
     tx_refresh: mpsc::Sender<()>,
 ) {
     let docker = Docker::connect_with_local_defaults().unwrap();
@@ -67,10 +67,10 @@ pub async fn run_action_loop(
                     ..Default::default()
                 })).await {
                     for img in images {
-                        items.push(app::JanitorItem {
+                        items.push(models::JanitorItem {
                             id: img.id.clone(),
                             name: "<none>".to_string(),
-                            kind: app::JanitorItemKind::Image,
+                            kind: models::JanitorItemKind::Image,
                             size: img.size as u64,
                             age: "Unknown".to_string(),
                             selected: true,
@@ -87,10 +87,10 @@ pub async fn run_action_loop(
                 })).await {
                     if let Some(vols) = volumes.volumes {
                         for vol in vols {
-                            items.push(app::JanitorItem {
+                            items.push(models::JanitorItem {
                                 id: vol.name.clone(),
                                 name: vol.name.clone(),
-                                kind: app::JanitorItemKind::Volume,
+                                kind: models::JanitorItemKind::Volume,
                                 size: 0,
                                 age: "-".to_string(),
                                 selected: false,
@@ -109,10 +109,10 @@ pub async fn run_action_loop(
                     ..Default::default()
                 })).await {
                     for c in containers {
-                        items.push(app::JanitorItem {
+                        items.push(models::JanitorItem {
                             id: c.id.unwrap_or_default(),
                             name: c.names.unwrap_or_default().first().cloned().unwrap_or_default(),
-                            kind: app::JanitorItemKind::Container,
+                            kind: models::JanitorItemKind::Container,
                             size: 0, // Container size requires size=true in list which is slow
                             age: c.status.unwrap_or_default(),
                             selected: true,
@@ -127,13 +127,13 @@ pub async fn run_action_loop(
                 let mut count = 0;
                 for item in items {
                     match item.kind {
-                        app::JanitorItemKind::Image => {
+                        models::JanitorItemKind::Image => {
                             let _ = docker.remove_image(&item.id, None::<RemoveImageOptions>, None).await;
                         },
-                        app::JanitorItemKind::Volume => {
+                        models::JanitorItemKind::Volume => {
                             let _ = docker.remove_volume(&item.id, None::<RemoveVolumeOptions>).await;
                         },
-                        app::JanitorItemKind::Container => {
+                        models::JanitorItemKind::Container => {
                             let _ = docker.remove_container(&item.id, None::<RemoveContainerOptions>).await;
                         },
                     }
