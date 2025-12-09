@@ -94,7 +94,7 @@ fn draw_memory_storage(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     f.render_widget(gauge_store, store_inner);
 }
 
-fn draw_net(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
+fn draw_net(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -103,11 +103,20 @@ fn draw_net(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let rx = app.net_rx_history.last().map(|&(_, y)| y).unwrap_or(0.0);
+    let tx = app.net_tx_history.last().map(|&(_, y)| y).unwrap_or(0.0);
+
+    let activity_status = if rx > 0.0 || tx > 0.0 {
+        Span::styled("Active", Style::default().fg(theme.running))
+    } else {
+        Span::styled("No Activity", Style::default().fg(theme.stopped).add_modifier(Modifier::ITALIC))
+    };
+
     let text = vec![
-        Line::from(vec![Span::raw("RX: "), Span::styled("0.0 kB/s", Style::default().fg(theme.foreground))]),
-        Line::from(vec![Span::raw("TX: "), Span::styled("0.0 kB/s", Style::default().fg(theme.foreground))]),
+        Line::from(vec![Span::raw("RX: "), Span::styled(format!("{:.1} kB/s", rx), Style::default().fg(theme.foreground))]),
+        Line::from(vec![Span::raw("TX: "), Span::styled(format!("{:.1} kB/s", tx), Style::default().fg(theme.foreground))]),
         Line::from(""),
-        Line::from(Span::styled("No Activity", Style::default().fg(theme.stopped).add_modifier(Modifier::ITALIC))),
+        Line::from(activity_status),
     ];
     let p = Paragraph::new(text).style(Style::default().fg(theme.foreground));
     f.render_widget(p, inner);

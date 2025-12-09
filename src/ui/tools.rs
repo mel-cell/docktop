@@ -8,7 +8,7 @@ use ratatui::{
 use crate::app::App;
 use crate::config::Theme;
 
-pub fn draw(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
+pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -44,8 +44,15 @@ pub fn draw(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
     let search_block = Block::default()
         .borders(Borders::ALL)
         .title(" Search ")
-        .border_style(Style::default().fg(theme.border));
-    let search_p = Paragraph::new("Filter: ...")
+        .border_style(if app.is_typing_filter { Style::default().fg(theme.running) } else { Style::default().fg(theme.border) });
+    
+    let query_text = if app.filter_query.is_empty() {
+        if app.is_typing_filter { "" } else { "Filter: ..." }
+    } else {
+        &app.filter_query
+    };
+    
+    let search_p = Paragraph::new(query_text)
         .block(search_block)
         .style(Style::default().fg(theme.foreground));
     f.render_widget(search_p, chunks[1]);

@@ -1,7 +1,7 @@
 use std::{io, time::Duration};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -309,6 +309,7 @@ async fn main() -> Result<()> {
             Duration::from_millis(app.config.general.refresh_rate_ms)
         };
         
+        app.refresh_system_stats();
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         let timeout = tick_rate
@@ -333,11 +334,31 @@ async fn main() -> Result<()> {
                         app.toggle_wizard();
                     }
                 } else if keys::key_matches(key, "Esc") {
-                    if app.show_help {
+                    if app.is_typing_filter {
+                        app.is_typing_filter = false;
+                        app.filter_query.clear();
+                    } else if app.show_help {
                         app.show_help = false;
                     } else if app.wizard.is_some() {
                         app.toggle_wizard();
                     }
+                } else if app.is_typing_filter {
+                    // Handle typing
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            app.filter_query.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.filter_query.pop();
+                        }
+                        KeyCode::Enter => {
+                            app.is_typing_filter = false;
+                        }
+                        _ => {}
+                    }
+                } else if keys::key_matches(key, "/") {
+                    app.is_typing_filter = true;
+                    app.filter_query.clear();
                 } else if keys::key_matches(key, &app.config.keys.toggle_help) {
                     app.show_help = !app.show_help;
                 } else {

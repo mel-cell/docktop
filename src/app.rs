@@ -3,7 +3,7 @@ use crate::docker::{Container, ContainerStats, ContainerInspection};
 use crate::config::Config;
 use std::collections::VecDeque;
 use std::fs;
-use sysinfo::System;
+use sysinfo::{System, Networks};
 use ratatui::widgets::ListState;
 use crate::wizard::models::*;
 
@@ -40,13 +40,16 @@ pub struct App {
     #[allow(dead_code)]
     pub globe_frames: Vec<Vec<String>>,
     pub _system: System,
+    pub _networks: Networks,
+    pub filter_query: String,
+    pub is_typing_filter: bool,
 }
 
 impl App {
     pub fn new() -> App {
         let mut fishes = Vec::new();
         for i in 0..10 {
-             fishes.push(Fish {
+            fishes.push(Fish {
                 x: (i * 5) as f64,
                 y: i % 5,
                 direction: if i % 2 == 0 { 1.0 } else { -1.0 },
@@ -103,6 +106,9 @@ impl App {
             wizard: None,
             show_help: false,
             _system: System::new_all(),
+            _networks: Networks::new_with_refreshed_list(),
+            filter_query: String::new(),
+            is_typing_filter: false,
         }
     }
 
@@ -110,6 +116,15 @@ impl App {
         // Filter
         if !self.config.general.show_all_containers {
             containers.retain(|c| c.state == "running");
+        }
+        
+        if !self.filter_query.is_empty() {
+            let query = self.filter_query.to_lowercase();
+            containers.retain(|c| {
+                c.names.iter().any(|n| n.to_lowercase().contains(&query)) ||
+                c.image.to_lowercase().contains(&query) ||
+                c.id.to_lowercase().contains(&query)
+            });
         }
 
         // Sort
@@ -218,6 +233,34 @@ impl App {
         } else {
             self.net_axis_bounds = [0.0, limit as f64];
         }
+    }
+
+    pub fn refresh_system_stats(&mut self) {
+        self._system.refresh_all();
+        self._networks.refresh(true);
+        
+        // Update CPU History
+        // Calculate average CPU usage across all cores
+        let cpus = self._system.cpus();
+        let cpu_usage = if !cpus.is_empty() {
+            cpus.iter().map(|c| c.cpu_usage()).sum::<f32>() / cpus.len() as f32
+        } else {
+            0.0
+        };
+        self.update_cpu_history(cpu_usage as f64);
+
+        // Update Network History (Global)
+        // We sum up all interfaces for a global view
+        let mut total_rx = 0.0;
+        let mut total_tx = 0.0;
+        for (_name, data) in &self._networks {
+            total_rx += data.received() as f64;
+            total_tx += data.transmitted() as f64;
+        }
+        // Convert to KB/s (assuming refresh is ~1s, but sysinfo gives total since last refresh)
+        // Actually sysinfo received() is "total received bytes since last refresh" if refreshed properly.
+        // So we just divide by 1024 for KB.
+        self.update_net_history(total_rx / 1024.0, total_tx / 1024.0);
     }
 
     pub fn update_fish(&mut self) {

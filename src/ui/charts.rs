@@ -18,7 +18,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     draw_storage_io(f, app, chunks[1], theme);
 }
 
-fn draw_network_traffic(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
+fn draw_network_traffic(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -27,8 +27,8 @@ fn draw_network_traffic(f: &mut Frame, _app: &App, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Mock data for visualization
-    let data = [2, 4, 6, 8, 5, 3, 2, 5, 8, 9, 4, 2, 1, 4, 6, 3, 2];
+    // Real data for visualization (RX)
+    let data: Vec<u64> = app.net_rx_history.iter().map(|&(_, y)| y as u64).collect();
     let sparkline = Sparkline::default()
         .block(Block::default().borders(Borders::NONE))
         .style(Style::default().fg(theme.chart_mid))
