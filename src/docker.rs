@@ -18,7 +18,7 @@ pub struct Container {
     #[serde(rename = "Status")]
     pub status: String,
     #[serde(rename = "Ports")]
-    pub ports: Vec<Port>,
+    pub ports: Option<Vec<Port>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

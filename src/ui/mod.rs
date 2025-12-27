@@ -43,13 +43,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .split(chunks[1]);
 
     containers::draw(f, app, main_chunks[0], theme);
-    
-    // Render Wizard inside Tools panel if active, otherwise render default Tools
-    if let Some(wizard) = &app.wizard {
-        draw_wizard(f, wizard, main_chunks[1], theme);
-    } else {
-        tools::draw(f, app, main_chunks[1], theme);
-    }
+    tools::draw(f, app, main_chunks[1], theme);
 
     // 3. Bottom Content (Charts + Logs)
     let bottom_chunks = Layout::default()
@@ -62,9 +56,66 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     charts::draw(f, app, bottom_chunks[0], theme);
     logs::draw(f, app, bottom_chunks[1], theme);
-
-    // 4. Footer
     footer::draw(f, app, chunks[3], theme);
+
+    // 5. Wizard Overlay (Focus Mode)
+    if let Some(wizard) = &app.wizard {
+        let area = centered_rect(80, 80, f.size());
+        f.render_widget(ratatui::widgets::Clear, area); 
+        draw_wizard(f, wizard, area, theme);
+    }
+
+    // 6. Toast Notifications (Top-Right)
+    if let Some((msg, time)) = &app.action_status {
+        if time.elapsed().as_secs() < 5 {
+            let toast_width = 40;
+            let toast_height = 3;
+            let size = f.size();
+            let area = Rect::new(
+                size.width.saturating_sub(toast_width + 2), // Top Right with padding
+                1, 
+                toast_width, 
+                toast_height
+            );
+            
+            f.render_widget(ratatui::widgets::Clear, area);
+            
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .title(" Notification ")
+                .border_style(Style::default().fg(theme.running).add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(theme.background));
+            
+            let text = Paragraph::new(msg.as_str())
+                .block(block)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD));
+            
+            f.render_widget(text, area);
+        }
+    }
+}
+
+// Helper to center rect
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 
@@ -158,7 +209,11 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::wizard::models::WizardState, area:
 
             // Left Side: Form
             let mut constraints = vec![Constraint::Length(1)]; // Title
-            constraints.extend(vec![Constraint::Length(3); 4]); // Basic fields
+            constraints.push(Constraint::Length(3)); // Image
+            constraints.push(Constraint::Length(3)); // Name
+            constraints.push(Constraint::Length(3)); // Ports
+            constraints.push(Constraint::Length(6)); // Env (Bigger!)
+            
             if *show_advanced {
                 constraints.extend(vec![Constraint::Length(3); 4]); // Advanced fields
             }
@@ -176,7 +231,7 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::wizard::models::WizardState, area:
                 ("Image Name", image),
                 ("Container Name", name),
                 ("Ports (host:container)", ports),
-                ("Env Vars (KEY=VAL)", env),
+                ("Env Vars (KEY=VAL, Space separated)", env),
             ];
 
             let profile_str = profile.display_name().to_string();
@@ -205,7 +260,8 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::wizard::models::WizardState, area:
                 }
 
                 let p = Paragraph::new(value.as_str())
-                    .block(Block::default().borders(Borders::ALL).title(title_text).border_style(style));
+                    .block(Block::default().borders(Borders::ALL).title(title_text).border_style(style))
+                    .wrap(Wrap { trim: true }); // Enable wrapping
                 f.render_widget(p, left_chunks[i+1]);
             }
 
@@ -240,11 +296,22 @@ fn draw_wizard(f: &mut Frame, wizard: &crate::wizard::models::WizardState, area:
             
             f.render_widget(preview_text, right_chunks[1]);
 
-            let help_text = if *show_advanced {
-                "ENTER: Create | TAB: Next Field | SPACE: Cycle Options"
+            let mut help_text = if *show_advanced {
+                "ENTER: Create | TAB: Next Field | SPACE: Cycle Options".to_string()
             } else {
-                "ENTER: Create | TAB: Next Field | Ctrl+A: Advanced Options"
+                "ENTER: Create | TAB: Next Field | Ctrl+A: Advanced Options".to_string()
             };
+
+            // Smart Hints for Databases
+            let img_lower = image.to_lowercase();
+            if img_lower.contains("mysql") || img_lower.contains("mariadb") {
+                help_text.push_str("\n\n[!] Hint: Set MYSQL_ROOT_PASSWORD=... in Env");
+            } else if img_lower.contains("postgres") {
+                help_text.push_str("\n\n[!] Hint: Set POSTGRES_PASSWORD=... in Env");
+            } else if img_lower.contains("mongo") {
+                help_text.push_str("\n\n[!] Hint: Set MONGO_INITDB_ROOT_USERNAME=... in Env");
+            }
+
             let help = Paragraph::new(help_text)
                 .block(Block::default().borders(Borders::ALL).title(" Help "))
                 .style(Style::default().fg(theme.border));

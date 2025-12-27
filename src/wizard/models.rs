@@ -208,6 +208,7 @@ pub enum WizardAction {
     Replace { old_id: String, image: String, name: String, ports: String, env: String, cpu: String, memory: String, restart: String },
     ScanJanitor,
     CleanJanitor(Vec<JanitorItem>),
+    EditPreview,
     Close,
 }
 

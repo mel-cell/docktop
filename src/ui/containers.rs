@@ -40,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             Cell::from(c.image.clone()),
             Cell::from("127.0.0.1"), // Mock IP for now, actual IP needs inspection
             Cell::from(c.status.clone()),
-            Cell::from(c.ports.iter().map(|p| format!("{}:{}", p.public_port.unwrap_or(0), p.private_port)).collect::<Vec<_>>().join(", ")),
+            Cell::from(c.ports.as_ref().unwrap_or(&vec![]).iter().map(|p| format!("{}:{}", p.public_port.unwrap_or(0), p.private_port)).collect::<Vec<_>>().join(", ")),
         ];
         Row::new(cells).height(1).style(Style::default().fg(theme.foreground))
     });

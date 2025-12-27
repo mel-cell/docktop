@@ -1,11 +1,8 @@
 use crate::wizard::models;
 use bollard::Docker;
-use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, BuildImageOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions, ListImagesOptions, ListVolumesOptions, ListContainersOptions, RemoveImageOptions, RemoveVolumeOptions};
+use bollard::query_parameters::{StartContainerOptions, CreateImageOptions, CreateContainerOptions, StopContainerOptions, RestartContainerOptions, RemoveContainerOptions, ListImagesOptions, ListVolumesOptions, ListContainersOptions, RemoveImageOptions, RemoveVolumeOptions};
 use bollard::models::{ContainerCreateBody, HostConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum};
 use futures_util::stream::StreamExt;
-use http_body_util::Full;
-use http_body_util::Either;
-use bytes::Bytes;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
@@ -45,6 +42,7 @@ pub async fn run_action_loop(
     tx_action_result: mpsc::Sender<String>,
     tx_janitor_items: mpsc::Sender<Vec<models::JanitorItem>>,
     tx_refresh: mpsc::Sender<()>,
+    tx_logs: mpsc::Sender<String>, // Added log channel
 ) {
     let docker = Docker::connect_with_local_defaults().unwrap();
     
@@ -55,6 +53,7 @@ pub async fn run_action_loop(
                 "Refreshed containers".to_string()
             },
             Action::ScanJanitor => {
+                // ... (existing janitor code)
                 let _ = tx_action_result.send("Scanning for junk...".to_string()).await;
                 let mut items = Vec::new();
                 
@@ -113,7 +112,7 @@ pub async fn run_action_loop(
                             id: c.id.unwrap_or_default(),
                             name: c.names.unwrap_or_default().first().cloned().unwrap_or_default(),
                             kind: models::JanitorItemKind::Container,
-                            size: 0, // Container size requires size=true in list which is slow
+                            size: 0, 
                             age: c.status.unwrap_or_default(),
                             selected: true,
                         });
@@ -124,6 +123,7 @@ pub async fn run_action_loop(
                 "Scan Complete".to_string()
             }
             Action::CleanJanitor(items) => {
+                 // ... (existing clean code, no changes needed logic-wise, just copy)
                 let mut count = 0;
                 for item in items {
                     match item.kind {
@@ -144,7 +144,7 @@ pub async fn run_action_loop(
                 }
                 format!("Janitor finished. Removed {} items.", count)
             }
-            Action::Start(id) => {
+             Action::Start(id) => {
                 match docker.start_container(&id, None::<StartContainerOptions>).await {
                     Ok(_) => format!("Started container {}", &id[..12]),
                     Err(e) => format!("Failed to start: {}", e),
@@ -162,29 +162,63 @@ pub async fn run_action_loop(
                     Err(e) => format!("Failed to restart: {}", e),
                 }
             }
-            Action::Create { image, name, ports, env, cpu, memory, restart } => {
+             Action::Create { image, name, ports, env, cpu, memory, restart } => {
+                // ... (Copy existing logic)
                 let _ = tx_action_result.send(format!("Pulling {}...", image)).await;
                 let mut stream = docker.create_image(
                     Some(CreateImageOptions { from_image: Some(image.clone()), ..Default::default() }),
                     None,
                     None
                 );
-                while let Some(_) = stream.next().await {}
+                
+                let mut last_status = String::new();
+                while let Some(chunk) = stream.next().await {
+                    if let Ok(info) = chunk {
+                        let status = info.status.unwrap_or_default();
+                        let progress = info.progress.unwrap_or_default();
+                        let current_msg = format!("{} {}", status, progress);
+                        
+                        // Simple throttle/dedup
+                        if current_msg != last_status {
+                            let _ = tx_action_result.send(format!("Pulling {}: {}", image, current_msg)).await;
+                            last_status = current_msg;
+                        }
+                    }
+                }
 
                 let _ = tx_action_result.send(format!("Creating {}...", name)).await;
                 
                 let mut port_bindings = std::collections::HashMap::new();
                 let mut exposed_ports = std::collections::HashMap::new();
                 if !ports.is_empty() {
-                        let parts: Vec<&str> = ports.split(':').collect();
-                        if parts.len() == 2 {
-                            let container_port = format!("{}/tcp", parts[1]);
-                            exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
-                            port_bindings.insert(container_port, Some(vec![PortBinding {
+                    // Split by space or comma to support multiple ports
+                    for port_def in ports.split(|c| c == ' ' || c == ',') {
+                        let port_def = port_def.trim();
+                        if port_def.is_empty() { continue; }
+                        
+                        let parts: Vec<&str> = port_def.split(':').collect();
+                        let (host_port, container_port_raw) = if parts.len() == 2 {
+                            (parts[0].trim().to_string(), parts[1].trim())
+                        } else if parts.len() == 1 {
+                            let p = parts[0].trim();
+                            (p.to_string(), p)
+                        } else {
+                            continue;
+                        };
+
+                        let container_port = format!("{}/tcp", container_port_raw);
+                        
+                        exposed_ports.insert(container_port.clone(), std::collections::HashMap::new());
+                        
+                        // Check if entry already exists
+                        port_bindings.entry(container_port)
+                            .or_insert_with(|| Some(Vec::new()))
+                            .as_mut()
+                            .map(|v| v.push(PortBinding {
                                 host_ip: Some("0.0.0.0".to_string()),
-                                host_port: Some(parts[0].to_string()),
-                            }]));
-                        }
+                                host_port: Some(host_port),
+                            }));
+                    }
                 }
 
                 let nano_cpus = if !cpu.is_empty() {
@@ -204,9 +238,14 @@ pub async fn run_action_loop(
                     }
                 } else { None };
 
-                let envs = if !env.is_empty() { Some(vec![env]) } else { None };
+                // robust env splitting
+                let envs = if !env.is_empty() { 
+                    Some(env.split(|c| c == ' ' || c == ';')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()) 
+                } else { None };
                 
-                // Restart Policy
                 let restart_policy = if !restart.is_empty() {
                     let name = match restart.as_str() {
                         "always" => RestartPolicyNameEnum::ALWAYS,
@@ -251,45 +290,86 @@ pub async fn run_action_loop(
             Action::Build { tag, path, mount } => {
                     let _ = tx_action_result.send(format!("Building {}...", tag)).await;
                     
-                    let mut tar = tar::Builder::new(Vec::new());
-                    if let Err(e) = tar.append_dir_all(".", &path) {
-                        format!("Failed to pack context: {}", e)
-                    } else {
-                        let tar_content = tar.into_inner().unwrap();
-                        let build_options = BuildImageOptions {
-                            t: Some(tag.clone()),
-                            rm: true,
-                            ..Default::default()
-                        };
-                        
-                        let body = Full::new(Bytes::from(tar_content));
-                        let mut stream = docker.build_image(build_options, None, Some(Either::Left(body)));
-                        while let Some(_) = stream.next().await {}
-                        
-                        // Run
-                        let _ = tx_action_result.send(format!("Running {}...", tag)).await;
-                        let mut host_config = HostConfig::default();
-                        if mount {
-                            if let Ok(abs_path) = std::fs::canonicalize(&path) {
-                                host_config.binds = Some(vec![format!("{}:/app", abs_path.to_string_lossy())]);
-                            }
+                    // Use CLI with pipes to capture output
+                    let mut cmd = std::process::Command::new("docker");
+                    cmd.arg("build")
+                       .arg("-t")
+                       .arg(&tag)
+                       .current_dir(&path)
+                       .arg(".")
+                       .stdout(std::process::Stdio::piped())
+                       .stderr(std::process::Stdio::piped());
+
+                    if let Ok(mut child) = cmd.spawn() {
+                        // Stream Logs
+                        if let Some(stdout) = child.stdout.take() {
+                             let tx = tx_logs.clone();
+                             tokio::spawn(async move {
+                                 use std::io::{BufRead, BufReader};
+                                 let reader = BufReader::new(stdout);
+                                 for line in reader.lines() {
+                                     if let Ok(l) = line {
+                                         let _ = tx.send(format!("[BUILD] {}", l)).await;
+                                     }
+                                 }
+                             });
+                        }
+                        if let Some(stderr) = child.stderr.take() {
+                             let tx = tx_logs.clone();
+                             tokio::spawn(async move {
+                                 use std::io::{BufRead, BufReader};
+                                 let reader = BufReader::new(stderr);
+                                 for line in reader.lines() {
+                                     if let Ok(l) = line {
+                                         let _ = tx.send(format!("[BUILD ERR] {}", l)).await;
+                                     }
+                                 }
+                             });
                         }
 
-                        let config = ContainerCreateBody {
-                            image: Some(tag.clone()),
-                            host_config: Some(host_config),
-                            ..Default::default()
-                        };
+                        let output = child.wait_with_output(); // Wait for completion
                         
-                        match docker.create_container(None::<CreateContainerOptions>, config).await {
-                            Ok(res) => {
-                                match docker.start_container(&res.id, None::<StartContainerOptions>).await {
-                                    Ok(_) => format!("Built and started {}", &res.id[..12]),
-                                    Err(e) => format!("Failed to start: {}", e),
+                        match output {
+                             Ok(o) => {
+                                if o.status.success() {
+                                    let _ = tx_action_result.send(format!("Build successful for {}", tag)).await;
+                                    
+                                    // Run
+                                    let _ = tx_action_result.send(format!("Running {}...", tag)).await;
+                                    let mut run_cmd = std::process::Command::new("docker");
+                                    run_cmd.arg("run")
+                                           .arg("-d")
+                                           .arg("--name")
+                                           .arg(format!("docktop_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())) 
+                                           .arg("-P"); 
+                                    
+                                    if mount {
+                                        if let Ok(abs_path) = std::fs::canonicalize(&path) {
+                                            run_cmd.arg("-v").arg(format!("{}:/app", abs_path.to_string_lossy()));
+                                        }
+                                    }
+                                    
+                                    run_cmd.arg(&tag);
+                                    
+                                    match run_cmd.output() {
+                                        Ok(run_o) => {
+                                            if run_o.status.success() {
+                                                let id = String::from_utf8_lossy(&run_o.stdout).trim().to_string();
+                                                format!("Built and started {}", &id[..12.min(id.len())])
+                                            } else {
+                                                format!("Built but failed to run: {}", String::from_utf8_lossy(&run_o.stderr))
+                                            }
+                                        },
+                                        Err(e) => format!("Built but failed to execute run: {}", e)
+                                    }
+                                } else {
+                                    format!("Build Failed. Check Logs.")
                                 }
-                            },
-                            Err(e) => format!("Failed to create: {}", e),
+                             }
+                             Err(e) => format!("Failed to wait for build: {}", e)
                         }
+                    } else {
+                        format!("Failed to spawn docker build")
                     }
             }
             Action::ComposeUp { path, override_path } => {

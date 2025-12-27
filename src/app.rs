@@ -362,9 +362,6 @@ impl App {
 
 
 
-
-
-
     pub fn wizard_handle_key(&mut self, key_event: crossterm::event::KeyEvent) -> Option<WizardAction> {
         let key = key_event.code;
         let modifiers = key_event.modifiers;
@@ -372,10 +369,22 @@ impl App {
         let mut action_msg = None;
         let mut wizard_action = None;
 
-        if let Some(wizard) = &mut self.wizard {
-            if key == KeyCode::Char('w') {
-                return Some(WizardAction::Close);
+        // Global Wizard Exit (Esc) - Safety Hatch
+        // If the wizard is active and Esc is pressed, close it, unless the current step
+        // explicitly handles Esc for 'back' navigation.
+        // For now, we'll make it a global exit if the step doesn't consume it.
+        if key == KeyCode::Esc {
+            if let Some(wizard) = &self.wizard {
+                // Check if the current step is ModeSelection, which should close on Esc.
+                // Other steps might use Esc for 'back', so we let them handle it first.
+                if let WizardStep::ModeSelection { .. } = wizard.step {
+                    self.wizard = None;
+                    return None;
+                }
             }
+        }
+
+        if let Some(wizard) = &mut self.wizard {
             match &mut wizard.step {
                 WizardStep::ModeSelection { selected_index } => {
                     match key {
@@ -412,7 +421,17 @@ impl App {
                                     temp_config: self.config.clone(),
                                 });
                             } else {
-                                let current_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                let mut current_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                
+                                // Smart Path Detection
+                                if *selected_index == 2 { // Docker Compose
+                                    // User requested to default to /docker if available
+                                    let docker_dir = current_path.join("docker");
+                                    if docker_dir.exists() && docker_dir.is_dir() {
+                                        current_path = docker_dir;
+                                    }
+                                }
+
                                 let expanded_paths = std::collections::HashSet::new(); // Start with nothing expanded
                                 let items = Self::load_directory_tree(&current_path, &expanded_paths);
                                 
@@ -560,6 +579,10 @@ impl App {
                                 previous_step: Box::new(prev),
                             });
                         }
+                        KeyCode::Esc => {
+                            // Allow backing out or closing
+                            return Some(WizardAction::Close);
+                        }
                         _ => {}
                     }
                 }
@@ -586,9 +609,16 @@ impl App {
                                 let path = item.path.clone();
                                 
                                 if *mode == FileBrowserMode::Build {
-                                    let (framework, version) = crate::wizard::logic::detect_framework(&path); // Pass path directly
+                                    // Ensure we pass a directory to detect_framework
+                                    let scan_path = if path.is_file() {
+                                        path.parent().unwrap_or(&path).to_path_buf()
+                                    } else {
+                                        path.clone()
+                                    };
+                                    
+                                    let (framework, version) = crate::wizard::logic::detect_framework(&scan_path); 
                                     next_step = Some(WizardStep::DockerfileGenerator {
-                                        path: path.clone(),
+                                        path: scan_path,
                                         detected_framework: framework.clone(),
                                         detected_version: version,
                                         manual_selection_open: false,
@@ -599,17 +629,29 @@ impl App {
                                         port_status: PortStatus::None,
                                     });
                                 } else if *mode == FileBrowserMode::Compose {
-                                    // Logic for Compose selection...
-                                    // For now, let's keep it simple: Space selects the file/folder
-                                    // But wait, Space in tree view usually doesn't enter.
-                                    // Let's make ENTER toggle folders or select files.
-                                    // And SPACE can be "Quick Action" like before?
-                                    // The user asked for "Select Project".
-                                    
-                                    // Let's stick to:
-                                    // ENTER on Dir: Toggle Expand/Collapse
-                                    // ENTER on File: Select it
-                                    // SPACE: (Maybe same as Enter for file?)
+                                    // Allow Space to select docker-compose.yml same as Enter
+                                    if let Some(name) = path.file_name() {
+                                        let name_str = name.to_string_lossy();
+                                        if name_str == "docker-compose.yml" || name_str == "docker-compose.yaml" {
+                                             if let Ok(content) = std::fs::read_to_string(&path) {
+                                                 if let Ok(compose) = serde_yaml::from_str::<ComposeFile>(&content) {
+                                                     let mut services: Vec<String> = compose.services.keys().cloned().collect();
+                                                     services.sort();
+                                                     
+                                                     next_step = Some(WizardStep::ComposeServiceSelection {
+                                                         path: path.clone(),
+                                                         selected_services: services.clone(),
+                                                         focused_index: 0,
+                                                         all_services: services,
+                                                     });
+                                                 } else {
+                                                     next_step = Some(WizardStep::Error(format!("Failed to parse {}", name_str)));
+                                                 }
+                                             } else {
+                                                 next_step = Some(WizardStep::Error(format!("Failed to read {}", name_str)));
+                                             }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1125,6 +1167,9 @@ impl App {
                         }
                         KeyCode::Esc => {
                             next_step = Some(*previous_step.clone());
+                        }
+                        KeyCode::Char('e') => {
+                            wizard_action = Some(WizardAction::EditPreview);
                         }
                         _ => {}
                     }

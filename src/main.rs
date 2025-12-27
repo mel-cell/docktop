@@ -201,6 +201,7 @@ async fn main() -> Result<()> {
     let client_clone3 = docker_client.clone();
     let mut rx_target_logger = rx_target.clone();
 
+    let tx_logs_streamer = tx_logs.clone();
     tokio::spawn(async move {
         let mut current_log_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut last_id: Option<String> = None;
@@ -216,7 +217,7 @@ async fn main() -> Result<()> {
                 
                 if let Some(id) = new_id.clone() {
                     let client = client_clone3.clone();
-                    let tx = tx_logs.clone();
+                    let tx = tx_logs_streamer.clone();
                     
                     current_log_task = Some(tokio::spawn(async move {
                         if let Ok(mut stream) = client.get_logs_stream(&id).await {
@@ -292,7 +293,7 @@ async fn main() -> Result<()> {
     });
 
     // Task 5: Action Executor
-    tokio::spawn(action::run_action_loop(rx_action, tx_action_result, tx_janitor_items, tx_refresh));
+    tokio::spawn(action::run_action_loop(rx_action, tx_action_result, tx_janitor_items, tx_refresh, tx_logs.clone()));
 
     // App State
     let mut app = App::new();
@@ -319,28 +320,78 @@ async fn main() -> Result<()> {
         if crossterm::event::poll(timeout)? {
             last_user_event = std::time::Instant::now();
             if let Event::Key(key) = event::read()? {
-                if keys::key_matches(key, &app.config.keys.quit) {
-                    if app.wizard.is_some() {
-                        app.toggle_wizard();
-                    } else {
-                        break;
+                // 0. Force Quit (Ctrl+C) - Always available for safety
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                    break;
+                }
+
+                // 1. Wizard / Modal Mode - Prioritize Input
+                if app.wizard.is_some() {
+                    // Check for Help in Wizard?
+                    // Usually we might want F1 help? But let's keep it simple: Wizard consumes all.
+                    // Exception: Maybe we want to allow `toggle_wizard` to close it IF it's not a printable char?
+                    // For now, let's rely on Esc handled by wizard logic.
+                    
+                    if let Some(wizard_action) = app.wizard_handle_key(key) {
+                         match wizard_action {
+                             crate::wizard::models::WizardAction::Close => {
+                                 app.wizard = None;
+                             },
+                             crate::wizard::models::WizardAction::EditPreview => {
+                                 // Handle external editor for Preview
+                                 if let Some(wizard) = &mut app.wizard {
+                                     if let crate::wizard::models::WizardStep::Preview { content, .. } = &mut wizard.step {
+                                         let file_path = "/tmp/docktop_preview.yml";
+                                         if std::fs::write(file_path, content.as_bytes()).is_ok() {
+                                             let _ = crossterm::terminal::disable_raw_mode();
+                                             let _ = execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+                                             
+                                             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                                             let _ = std::process::Command::new(editor).arg(file_path).status();
+                                             
+                                             let _ = crossterm::terminal::enable_raw_mode();
+                                             let _ = execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen, crossterm::event::EnableMouseCapture);
+                                             let _ = terminal.clear(); // Redraw immediately
+                                             
+                                             if let Ok(new_content) = std::fs::read_to_string(file_path) {
+                                                 *content = new_content;
+                                             }
+                                         }
+                                     }
+                                 }
+                             },
+                             wa => {
+                                 // Map other actions to backend Action
+                                 let action = match wa {
+                                     crate::wizard::models::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
+                                     crate::wizard::models::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
+                                     crate::wizard::models::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
+                                     crate::wizard::models::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
+                                     crate::wizard::models::WizardAction::ScanJanitor => Action::ScanJanitor,
+                                     crate::wizard::models::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
+                                     _ => Action::RefreshContainers, // Fallback/No-op
+                                 };
+                                 let _ = tx_action.send(action).await;
+                             }
+                         }
                     }
+
+                }
+                // 2. Global Hotkeys (Only when Wizard is CLOSED)
+                else if keys::key_matches(key, &app.config.keys.quit) {
+                    break;
                 } else if keys::key_matches(key, &app.config.keys.refresh) {
                     let _ = tx_action.send(Action::RefreshContainers).await;
                 } else if keys::key_matches(key, &app.config.keys.toggle_wizard) {
                     app.toggle_wizard();
                 } else if keys::key_matches(key, "c") || keys::key_matches(key, "Tab") {
-                    if app.wizard.is_none() {
-                        app.toggle_wizard();
-                    }
+                     app.toggle_wizard();
                 } else if keys::key_matches(key, "Esc") {
                     if app.is_typing_filter {
                         app.is_typing_filter = false;
                         app.filter_query.clear();
                     } else if app.show_help {
                         app.show_help = false;
-                    } else if app.wizard.is_some() {
-                        app.toggle_wizard();
                     }
                 } else if app.is_typing_filter {
                     // Handle typing
@@ -364,26 +415,12 @@ async fn main() -> Result<()> {
                 } else {
                     if app.show_help {
                         // Ignore other keys when help is shown
-                    } else if app.wizard.is_some() {
-                        if let Some(wizard_action) = app.wizard_handle_key(key) {
-                            if let crate::wizard::models::WizardAction::Close = wizard_action {
-                                app.wizard = None;
-                            } else {
-                                let action = match wizard_action {
-                                    crate::wizard::models::WizardAction::Create { image, name, ports, env, cpu, memory, restart } => Action::Create { image, name, ports, env, cpu, memory, restart },
-                                    crate::wizard::models::WizardAction::Build { tag, path, mount } => Action::Build { tag, path, mount },
-                                    crate::wizard::models::WizardAction::ComposeUp { path, override_path } => Action::ComposeUp { path, override_path },
-                                    crate::wizard::models::WizardAction::Replace { old_id, image, name, ports, env, cpu, memory, restart } => Action::Replace { old_id, image, name, ports, env, cpu, memory, restart },
-                                    crate::wizard::models::WizardAction::ScanJanitor => Action::ScanJanitor,
-                                    crate::wizard::models::WizardAction::CleanJanitor(items) => Action::CleanJanitor(items),
-                                    crate::wizard::models::WizardAction::Close => unreachable!(),
-                                };
-                                let _ = tx_action.send(action).await;
-                            }
-                        }
                     } else {
                         if keys::key_matches(key, &app.config.keys.enter) {
                             app.show_details = !app.show_details;
+                            if let Some(c) = app.get_selected_container() {
+                                let _ = tx_target.send(Some(c.id.clone()));
+                            }
                         } else if keys::key_matches(key, &app.config.keys.delete) {
                             if let Some(c) = app.get_selected_container() {
                                 let _ = tx_action.send(Action::Delete(c.id.clone())).await;
@@ -394,8 +431,8 @@ async fn main() -> Result<()> {
                                 let _ = tx_target.send(Some(c.id.clone()));
                             }
                         } else if keys::key_matches(key, &app.config.keys.up) {
-                            app.previous();
-                            if let Some(c) = app.get_selected_container() {
+                             app.previous();
+                             if let Some(c) = app.get_selected_container() {
                                 let _ = tx_target.send(Some(c.id.clone()));
                             }
                         } else if keys::key_matches(key, &app.config.keys.edit) {

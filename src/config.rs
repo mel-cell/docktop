@@ -342,25 +342,25 @@ pub fn get_preset_theme_def(name: &str) -> ThemeDefinition {
         },
         "cyberpunk" | "cyberpunk neon" => ThemeDefinition {
             name: "Cyberpunk Neon".to_string(),
-            background: "#000000".to_string(),
-            foreground: "#00ff00".to_string(),
-            border: "#ff00ff".to_string(),
-            running: "#00ff9f".to_string(),
-            stopped: "#ff0055".to_string(),
-            restarting: "#f6ff00".to_string(),
-            selection_bg: "#00ff9f".to_string(),
-            selection_fg: "#000000".to_string(),
-            header_fg: "#f6ff00".to_string(),
-            cpu_low: "#00ff9f".to_string(),
-            cpu_mid: "#00b8ff".to_string(),
+            background: "#0d0e15".to_string(), // Deep dark slate/blue
+            foreground: "#a9b1d6".to_string(), // Soft white/blue
+            border: "#00f3ff".to_string(),     // Neon Cyan
+            running: "#00ff94".to_string(),    // Neon Green
+            stopped: "#ff0055".to_string(),    // Neon Red
+            restarting: "#ffe600".to_string(), // Neon Yellow
+            selection_bg: "#ff00ff".to_string(), // Neon Magenta (Selection)
+            selection_fg: "#ffffff".to_string(), // White text on Magenta
+            header_fg: "#00f3ff".to_string(),    // Cyan Headers
+            cpu_low: "#00ff94".to_string(),
+            cpu_mid: "#00f3ff".to_string(),
             cpu_high: "#ff0055".to_string(),
-            memory_chart: "#bd00ff".to_string(),
-            network_rx: "#00b8ff".to_string(),
+            memory_chart: "#bd00ff".to_string(), // Electric Purple
+            network_rx: "#00f3ff".to_string(),
             network_tx: "#ff0055".to_string(),
-            chart_low: "#00ff9f".to_string(),
-            chart_mid: "#00b8ff".to_string(),
+            chart_low: "#00ff94".to_string(),
+            chart_mid: "#00f3ff".to_string(),
             chart_high: "#ff0055".to_string(),
-            header_bg: "#111111".to_string(),
+            header_bg: "#1a1b26".to_string(),    // Slightly lighter background
         },
         _ => ThemeDefinition::default(),
     }
